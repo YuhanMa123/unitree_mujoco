@@ -3,6 +3,7 @@ import numpy as np
 import pygame
 import sys
 import struct
+import threading
 
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelPublisher
 
@@ -43,6 +44,13 @@ class UnitreeSdk2Bridge:
         self.have_frame_sensor = False
         self.dt = self.mj_model.opt.timestep
         self.idl_type = (self.num_motor > NUM_MOTOR_IDL_GO) # 0: unitree_go, 1: unitree_hg
+
+        # DDS callbacks only cache commands; the physics thread owns ctrl.
+        self.command_lock = threading.Lock()
+        self.motor_command = np.zeros((5, self.num_motor))
+        motor_joints = self.mj_model.actuator_trnid[:, 0]
+        self.motor_qpos_adr = self.mj_model.jnt_qposadr[motor_joints]
+        self.motor_dof_adr = self.mj_model.jnt_dofadr[motor_joints]
 
         self.joystick = None
 
@@ -109,18 +117,24 @@ class UnitreeSdk2Bridge:
         }
 
     def LowCmdHandler(self, msg: LowCmd_):
-        if self.mj_data != None:
-            for i in range(self.num_motor):
-                self.mj_data.ctrl[i] = (
-                    msg.motor_cmd[i].tau
-                    + msg.motor_cmd[i].kp
-                    * (msg.motor_cmd[i].q - self.mj_data.sensordata[i])
-                    + msg.motor_cmd[i].kd
-                    * (
-                        msg.motor_cmd[i].dq
-                        - self.mj_data.sensordata[i + self.num_motor]
-                    )
-                )
+        command = np.array([
+            [motor.q, motor.dq, motor.kp, motor.kd, motor.tau]
+            for motor in msg.motor_cmd[:self.num_motor]
+        ], dtype=float).T
+        if command.shape != (5, self.num_motor) or not np.all(np.isfinite(command)):
+            return
+        with self.command_lock:
+            self.motor_command = command
+
+    def UpdateMotorControl(self):
+        """Call under the simulation lock immediately before every mj_step."""
+        with self.command_lock:
+            q_target, dq_target, kp, kd, tau = self.motor_command.copy()
+        # sensordata can still describe the preceding integration step.
+        # Use current generalized positions/velocities for PD feedback.
+        q = self.mj_data.qpos[self.motor_qpos_adr]
+        dq = self.mj_data.qvel[self.motor_dof_adr]
+        self.mj_data.ctrl[:] = tau + kp * (q_target - q) + kd * (dq_target - dq)
 
     def PublishLowState(self):
         if self.mj_data != None:

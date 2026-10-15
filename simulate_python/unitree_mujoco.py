@@ -56,6 +56,7 @@ def SimulationThread():
                 mj_data.xfrc_applied[band_attached_link, :3] = elastic_band.Advance(
                     mj_data.qpos[:3], mj_data.qvel[:3]
                 )
+        unitree.UpdateMotorControl()
         mujoco.mj_step(mj_model, mj_data)
 
         locker.release()
