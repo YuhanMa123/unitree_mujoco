@@ -1,10 +1,13 @@
 # G1 29DOF 关节角度复位
 
+复位后接入项目 `policy.onnx` 进行 locomotion 推理，参见
+[G1 locomotion 使用说明](README_g1_locomotion.md)。
+
 `reset_g1_29dof.cpp` 通过 Unitree SDK2 的 `rt/lowstate` 读取当前关节角度，
 以 500 Hz 发布 `unitree_hg::msg::dds_::LowCmd_` 到 `rt/lowcmd`。
-启动后默认关闭命令下发。在控制程序所在终端按 **R / r**（无需回车），
-生成 3 秒的 smoothstep 复位目标；只有按 **E / e** 使能下发后才向 `rt/lowcmd`
-发布控制命令，目标到达后持续 PD 保持。
+启动后默认关闭命令下发。在控制程序所在终端先按 **9** 上电（使能命令输出），
+再按 **P / p**（无需回车），生成 3 秒的 smoothstep 复位目标并向 `rt/lowcmd`
+发布控制命令，目标到达后持续 PD 保持。未上电时复位按键会被拒绝。
 未列出的关节目标为 **0 rad**。
 
 | 关节 | 左侧目标（rad） | 右侧目标（rad） |
@@ -22,7 +25,7 @@
 
 ## 编译
 
-需要已安装 `unitree_sdk2` 和 Boost 头文件，然后在仓库根目录运行：
+需要已安装 `unitree_sdk2`、Boost 头文件和 yaml-cpp，然后在仓库根目录运行：
 
 ```bash
 cmake -S example/cpp -B example/cpp/build
@@ -78,8 +81,8 @@ python simulate_python/joint_monitor.py --domain 1 --interface lo --port 8765
 实际频率受 DDS 发布频率、系统负载和网络影响。可通过 `--rate 500` 将采样上限提高到 500 Hz。
 力矩来自 `LowState.motor_state.tau_est`；目标和 PD 优先来自独立目标话题，未使能下发时也可显示；兼容从 `rt/lowcmd` 读取目标。
 尚未收到目标，或目标超过 500 ms 未更新时，目标和误差显示为 —。
-按 `r` 后 C++ 程序会向目标话题持续发布计算中的目标；该话题仅用于监控，
-仿真器不订阅它，因此不改变未使能时不下发控制命令的行为。
+按 `p` 后 C++ 程序会向目标话题持续发布计算中的目标；该话题仅用于监控，
+仿真器不订阅它；控制命令仅在完成上电并进入复位后发布。
 页面时间为监控启动后的时间，数据中断会提示；监控脚本按 `Ctrl+C` 独立退出。
 默认只允许本机访问，不需要安装额外 Web 库。脚本需要 G1 29DOF 消息及关节顺序；
 Python 仿真发布的模式为 0 时无法自动辨别型号，请确认加载了正确场景。
@@ -90,20 +93,18 @@ Python 仿真发布的模式为 0 时无法自动辨别型号，请确认加载�
 ./example/cpp/build/reset_g1_29dof
 # 可选参数：复位秒数、网卡、DDS domain、XML 配置路径
 ./example/cpp/build/reset_g1_29dof 5 lo 1
-./example/cpp/build/reset_g1_29dof 3 lo 1 example/cpp/g1_reset.xml
+./example/cpp/build/reset_g1_29dof 3 lo 1 example/cpp/g1_locomotion.yaml
 ```
 
 按键在 **C++ 控制程序所在终端** 生效。
 按键操作：
 
-- `r`：生成复位目标，未使能时只计算目标，不下发。
-- `e`：使能命令输出；已有目标时从当前实测角度重新平滑复位，避免目标跳变。
-  还未设置目标时需再按 `r` 才开始下发。
-- `d`：关闭命令输出；已经在下发时先发送一次零增益、零力矩命令，
-  清除仿真缓存的力矩，然后停止发布。内部目标计算继续。
+- `9`：上电，随后需按 `p` 开始复位。首次进入复位后，`9` 在本次进程中永久锁定。
+- `p`：上电后从当前实测角度平滑复位。
+- 空格 / Ctrl+C：清零控制增益及前馈力矩后退出。
 
-复位中或保持中再次按 `r`，会重新读取当前关节角度并开始复位。
-按 **空格**、`q` 或 `Ctrl+C` 退出，正在下发控制时清零增益和前馈力矩。
+复位中或保持中再次按 `p`，会重新读取当前关节角度并开始复位。
+按 **空格** 或 `Ctrl+C` 退出，正在下发控制时清零增益和前馈力矩。
 这里的“使能”是仿真控制程序的命令输出开关，不是实物电源控制。
 
 必须加载 G1 的 `scene_29dof.xml`，不能使用 H2 场景。
@@ -114,33 +115,16 @@ Python 仿真发布的模式为 0 时无法自动辨别型号，请确认加载�
 
 ## 修改默认姿态和 PD 参数
 
-修改 [`g1_reset.xml`](g1_reset.xml)，保存后重启控制程序即可，**无需重新编译**。
-默认路径为编译时源目录中的 `g1_reset.xml`，也可通过第四个参数指定其他 XML 文件。
-配置在启动时读取，不会在运行期间自动重载。
+复位和推理统一读取 [`g1_locomotion.yaml`](g1_locomotion.yaml)，已移除独立 reset XML。
+保存配置并重启控制程序即可，无需重新编译。第四个参数可指定其他 YAML 文件。
 
-```xml
-<joint name="left_shoulder_pitch_joint" default_pos="0.3" kp="40" kd="3"/>
-```
+- `default_joint_pos`：29 个关节的复位目标（rad），采用策略顺序。
+- `joint_ids_map`：策略索引到 DDS 关节索引的映射，复位读取时自动转换。
+- `stiffness` / `damping`：29 个关节的 Kp / Kd，直接采用 DDS 顺序。
 
-`default_pos` 单位为 rad；`kp` 为 stiffness，`kd` 为 damping。
-按完整关节名称匹配，不使用正则表达式；XML 中关节排列顺序不限。
-必须包含全部 29 个关节，缺失、重复、未知名称、无效数值及负增益都会报错退出。
-关节 DDS 顺序详见
-[`g1_joint_index_dds.md`](../../unitree_robots/g1/g1_joint_index_dds.md)。
-XML 的初始 PD 参数按提供的执行器配置设置：
-
-| 关节（左右相同） | Kp | Kd |
-| --- | --- | --- |
-| hip_pitch / hip_yaw | 50 | 2.5 |
-| hip_roll | 75 | 2.5 |
-| knee | 100 | 4 |
-| ankle_pitch / ankle_roll | 40 | 2 |
-| waist_yaw | 100 | 5 |
-| waist_roll / waist_pitch | 75 | 5 |
-| shoulder / elbow / wrist | 40 | 3 |
-
-这里映射的是控制器的 PD 增益；执行器配置中的力矩上限、速度上限及 armature
-属于仿真模型参数，此次未修改。
+默认采用 WalkNet1 PD：髋关节 100/2、膝关节 150/4、踝关节 40/2、
+腰 yaw 200/5、腰 roll/pitch 40/5、肩/肘/腕 40/1。
+配置会检查长度、关节映射及数值有效性。
 
 程序打印“插值完成”
 表示目标轨迹到达默认姿态，不代表实际关节误差已严格为零。
@@ -155,8 +139,8 @@ Python 桥接的 `mode_machine` 默认为 0，程序无法据此辨别 23DOF/29D
 LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} ./example/cpp/build/reset_g1_29dof
 ```
 
-Enable 显示的是控制端输出开关，而非实物上电反馈。按 `e` 后显示 ON，按 `d` 后显示 OFF；
-控制端退出或状态超过 500 ms 未更新后显示 —。未按 `r` 生成目标时也会发布使能状态。
+Enable 显示的是控制端输出开关，而非实物上电反馈。按 `9` 后显示 ON，退出后停止发布使能状态；
+控制端退出或状态超过 500 ms 未更新后显示 —。未按 `p` 生成目标时也会发布使能状态。
 
 网页 IMU 面板显示 `LowState.imu_state` 的四元数（w,x,y,z）、姿态 RPY、
 三轴角速度和三轴加速度。RPY 从四元数计算，以兼容未填充 rpy 的 Python 桥接。
