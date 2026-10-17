@@ -1,5 +1,11 @@
 
 # 介绍
+## G1 Parkour 推理
+
+使用现有 Python MuJoCo 仿真和 C++ ONNX Runtime 运行 G1 Parkour 双网络策略，
+包含 DDS 控制、腰部坐标转换和深度相机预览。
+编译、启动、按键及验证方法见 [G1 Parkour 接入说明](example/cpp/README_g1_parkour.md)。
+
 ## Unitree mujoco
 `unitree_mujoco` 是基于 `Unitree sdk2` 和 `mujoco` 开发的仿真器。用户使用 `Unitree_sdk2`、 `unitree_ros2` 和 `unitree_sdk2_python` 开发的控制程序可以方便地接入该仿真器，实现仿真到实物的开发流程。仓库别基于 c++ 和 python 实现了两个版本的仿真器， 其结构大致如下图所示:
 

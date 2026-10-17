@@ -12,3 +12,9 @@ ENABLE_ELASTIC_BAND = True # Virtual spring band for humanoid joint reset
 
 SIMULATE_DT = 0.002  # 500 Hz physics; recompute PD before every step
 VIEWER_DT = 0.02  # 50 fps for viewer
+
+# Synchronized observations for example/cpp/build/g1_parkour (loopback UDP).
+# No Python ONNX inference is used. Set False for the original DDS-only simulator.
+PARKOUR_OBSERVATIONS = True
+PARKOUR_OBSERVATION_PORT = 17200
+PARKOUR_DEPTH_PREVIEW = True  # Raw depth and the latest encoder frame (OpenCV window)
