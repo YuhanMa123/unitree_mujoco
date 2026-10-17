@@ -34,6 +34,7 @@
 #include "array_safety.h"
 #include "unitree_sdk2_bridge.h"
 #include "param.h"
+#include "gamepad_controls.h"
 
 #define MUJOCO_PLUGIN_DIR "mujoco_plugin"
 
@@ -98,6 +99,8 @@ namespace
   // model and data
   mjModel *m = nullptr;
   mjData *d = nullptr;
+  std::unique_ptr<unitree_mujoco::gamepad::Reader> gamepad_reader;
+  std::unique_ptr<unitree_mujoco::SimulatorGamepad> gamepad_controls;
 
   // control noise variables
   mjtNum *ctrlnoise = nullptr;
@@ -326,6 +329,8 @@ namespace
   // simulate in background thread (while rendering in main thread)
   void PhysicsLoop(mj::Simulate &sim)
   {
+    bool gamepad_connected = false;
+    bool gamepad_reported = false;
     // cpu-sim syncronization point
     std::chrono::time_point<mj::Simulate::Clock> syncCPU;
     mjtNum syncSim = 0;
@@ -415,6 +420,24 @@ namespace
         // run only if model is present
         if (m)
         {
+          if (gamepad_reader)
+          {
+            const auto input = gamepad_reader->Poll();
+            if (!gamepad_reported || input.connected != gamepad_connected)
+            {
+              if (input.connected)
+                std::cout << "Simulator gamepad connected: " << gamepad_reader->Name() << '\n';
+              else
+                std::cout << "Simulator gamepad unavailable: " << gamepad_reader->Error()
+                          << "; keyboard remains available; retrying.\n";
+              gamepad_connected = input.connected;
+              gamepad_reported = true;
+            }
+            const double now = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            gamepad_controls->Update(input, m, d, sim.cam, elastic_band,
+                                     param::config.enable_elastic_band == 1, now);
+          }
           // running
           if (sim.run)
           {
@@ -498,6 +521,13 @@ namespace
                     d->xfrc_applied[param::config.band_attached_link] = elastic_band.f_[0];
                     d->xfrc_applied[param::config.band_attached_link + 1] = elastic_band.f_[1];
                     d->xfrc_applied[param::config.band_attached_link + 2] = elastic_band.f_[2];
+                  }
+                  else
+                  {
+                    // Release the last spring force when the band is disabled.
+                    d->xfrc_applied[param::config.band_attached_link] = 0;
+                    d->xfrc_applied[param::config.band_attached_link + 1] = 0;
+                    d->xfrc_applied[param::config.band_attached_link + 2] = 0;
                   }
                 }
 
@@ -683,6 +713,17 @@ int main(int argc, char **argv)
   std::filesystem::path proj_dir = std::filesystem::path(getExecutableDir()).parent_path();
   param::config.load_from_yaml(proj_dir / "config.yaml");
   param::helper(argc, argv);
+  try {
+    const auto gamepad = unitree_mujoco::gamepad::Config::Load((proj_dir / "gamepad.yaml").string());
+    if (gamepad.enabled) {
+      gamepad_reader = std::make_unique<unitree_mujoco::gamepad::Reader>(gamepad);
+      gamepad_controls = std::make_unique<unitree_mujoco::SimulatorGamepad>(gamepad);
+      std::cout << "Xbox simulator controls enabled: Y/A lift/lower, X release band, RB reattach, LB lock base/heading view, hold LT temporary heading view.\n";
+    }
+  } catch (const std::exception& error) {
+    std::cerr << "Gamepad configuration: " << error.what() << '\n';
+    return 1;
+  }
   if(param::config.robot_scene.is_relative()) {
     param::config.robot_scene = proj_dir.parent_path() / "unitree_robots" / param::config.robot / param::config.robot_scene;
   }

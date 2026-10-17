@@ -9,6 +9,13 @@ find_package(yaml-cpp REQUIRED)
 add_executable(stand_go2 stand_go2.cpp)
 target_link_libraries(stand_go2  unitree_sdk2)
 
+add_executable(gamepad_monitor gamepad_monitor.cpp)
+target_compile_features(gamepad_monitor PRIVATE cxx_std_17)
+target_include_directories(gamepad_monitor PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
+target_link_libraries(gamepad_monitor yaml-cpp)
+target_compile_definitions(gamepad_monitor PRIVATE
+    G1_GAMEPAD_DEFAULT_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/gamepad.yaml")
+
 add_executable(reset_g1_29dof reset_g1_29dof.cpp)
 target_compile_features(reset_g1_29dof PRIVATE cxx_std_17)
 target_link_libraries(reset_g1_29dof unitree_sdk2 Boost::boost yaml-cpp)
@@ -54,7 +61,7 @@ endif()
 if(BUILD_G1_LOCOMOTION)
     add_executable(g1_locomotion reset_g1_29dof.cpp)
     target_compile_features(g1_locomotion PRIVATE cxx_std_17)
-    target_include_directories(g1_locomotion PRIVATE "${ONNXRUNTIME_INCLUDE_DIR}")
+    target_include_directories(g1_locomotion PRIVATE "${ONNXRUNTIME_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
     target_link_libraries(g1_locomotion unitree_sdk2 Boost::boost yaml-cpp "${ONNXRUNTIME_LIBRARY}")
     if(UNIX AND NOT APPLE)
         # Use the linked SDK/ORT versions even in a shell that has sourced ROS.
@@ -62,9 +69,20 @@ if(BUILD_G1_LOCOMOTION)
     endif()
     target_compile_definitions(g1_locomotion PRIVATE G1_WITH_POLICY
         G1_POLICY_DEFAULT_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/g1_locomotion.yaml"
-        G1_POLICY_DEFAULT_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/../../policy.onnx")
+        G1_POLICY_DEFAULT_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/../../policy.onnx"
+        G1_GAMEPAD_DEFAULT_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/gamepad.yaml")
     include(CTest)
     if(BUILD_TESTING)
+        add_executable(g1_gamepad_test tests/g1_gamepad_test.cpp)
+        target_compile_features(g1_gamepad_test PRIVATE cxx_std_17)
+        target_include_directories(g1_gamepad_test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/mujoco/include")
+        target_link_libraries(g1_gamepad_test yaml-cpp
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/mujoco/lib/libmujoco.so")
+        add_test(NAME g1_gamepad COMMAND g1_gamepad_test
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/gamepad.yaml")
         add_executable(g1_hardware_test tests/g1_hardware_test.cpp)
         target_compile_features(g1_hardware_test PRIVATE cxx_std_17)
         target_include_directories(g1_hardware_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

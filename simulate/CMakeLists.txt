@@ -19,6 +19,7 @@ include_directories(
   mujoco/include
   mujoco/simulate
   src/lodepng
+  ../include
 )
 link_directories(mujoco/lib)
 

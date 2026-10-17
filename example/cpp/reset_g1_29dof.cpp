@@ -29,6 +29,7 @@
 #include <unitree/robot/channel/channel_subscriber.hpp>
 #ifdef G1_WITH_POLICY
 #include "g1_locomotion_policy.h"
+#include <unitree_mujoco/gamepad.h>
 #endif
 
 using unitree_hg::msg::dds_::LowCmd_;
@@ -189,8 +190,17 @@ public:
         std::array<float, 3> velocity{};
         g1_policy::Joints policy_target{};
         auto next_policy = Clock::now();
+        auto next_velocity_log = Clock::now();
+        unitree_mujoco::gamepad::Config gamepad_config;
+        gamepad_config.enabled = false;
+        if (!hardware_) gamepad_config = unitree_mujoco::gamepad::Config::Load(G1_GAMEPAD_DEFAULT_CONFIG);
+        unitree_mujoco::gamepad::Reader gamepad_reader(gamepad_config);
+        unitree_mujoco::gamepad::Drive gamepad_drive(gamepad_config);
+        bool gamepad_connected = false, gamepad_reported = false;
         std::cout << "Sequence: 9 -> P (wait for reset) -> R (policy). P: return to reset; 9 is locked after P.\n"
                   << "W/S: forward +/-0.1 m/s, A/D: lateral +/-0.1 m/s, Q/E: yaw +/-0.1 rad/s, X: zero velocity.\n";
+        if (gamepad_config.enabled)
+            std::cout << "Xbox: B enables/resets, Menu starts policy, left stick / D-pad translate, right stick turns, View / R3 stops.\n";
 #endif
         auto publish_enable = [&](bool enabled) {
             LowCmd_ status{};
@@ -234,7 +244,27 @@ public:
                 break;
             }
             if (key == ' ') break;
-            if (key == '9') {
+            bool reset_requested = key == 'p' || key == 'P';
+            bool enable_requested = key == '9';
+#ifdef G1_WITH_POLICY
+            bool policy_requested = key == 'r' || key == 'R';
+            const auto pad = gamepad_reader.Poll();
+            if (gamepad_config.enabled && (!gamepad_reported || pad.connected != gamepad_connected)) {
+                if (pad.connected)
+                    std::cout << "Controller gamepad connected: " << gamepad_reader.Name() << '\n';
+                else
+                    std::cout << "Controller gamepad unavailable: " << gamepad_reader.Error()
+                              << "; velocity cleared, keyboard available; retrying.\n";
+                gamepad_connected = pad.connected;
+                gamepad_reported = true;
+            }
+            const auto gamepad_action = gamepad_drive.Update(pad, velocity, policy_active);
+            if (gamepad_action.stop || gamepad_action.suspend) velocity.fill(0);
+            reset_requested |= gamepad_action.reset || (gamepad_action.suspend && policy_active);
+            enable_requested |= gamepad_action.reset && !output_enabled;
+            policy_requested |= gamepad_action.start;
+#endif
+            if (enable_requested) {
                 if (power_locked) {
                     std::cout << "Power-on locked after reset/policy entry; restart the controller to power on again.\n";
                 } else if (output_enabled) {
@@ -250,14 +280,15 @@ public:
                     std::cout << "Command output ENABLED. Press P to reset.\n";
                 }
             }
-            if ((key == 'p' || key == 'P') && !output_enabled) {
+            if (reset_requested && !output_enabled) {
                 std::cout << "Reset requires power-on. Press 9 before P.\n";
             }
-            if ((key == 'p' || key == 'P') && output_enabled) {
+            if (reset_requested && output_enabled) {
                 power_locked = true;
 #ifdef G1_WITH_POLICY
                 policy_active = false;
                 velocity.fill(0);
+                gamepad_drive.Clear();
                 if (policy_) policy_->Reset();
 #endif
                 for (std::size_t i = 0; i < kJointCount; ++i)
@@ -269,7 +300,7 @@ public:
                           << (output_enabled ? " Publishing enabled.\n" : " Output disabled; targets only.\n");
             }
 #ifdef G1_WITH_POLICY
-            if ((key == 'r' || key == 'R') && !policy_active) {
+            if (policy_requested && !reset_requested && !policy_active) {
                 bool pose_ready = true;
                 const auto neutral = policy_->DefaultDds();
                 for (std::size_t i = 0; i < kJointCount; ++i)
@@ -279,12 +310,19 @@ public:
                 } else {
                     policy_->Reset();
                     velocity.fill(0);
+                    gamepad_drive.Clear();
                     policy_active = true;
                     next_policy = Clock::now();
                     std::cout << "Locomotion policy ON; velocity = [0, 0, 0]. P: reset, Space / Ctrl+C: exit.\n";
                 }
             }
             if (policy_active) {
+                const auto old_velocity = velocity;
+                if (gamepad_action.planar_update) {
+                    velocity[0] = gamepad_action.velocity[0];
+                    velocity[1] = gamepad_action.velocity[1];
+                }
+                if (gamepad_action.yaw_update) velocity[2] = gamepad_action.velocity[2];
                 bool changed = true;
                 switch (key) {
                     case 'w': case 'W': velocity[0] += 0.1f; break;
@@ -296,8 +334,12 @@ public:
                     case 'x': case 'X': velocity.fill(0); break;
                     default: changed = false;
                 }
+                if (changed) gamepad_drive.Clear();
                 policy_->ClampVelocity(velocity);
-                if (changed) std::cout << "Velocity: " << velocity[0] << ", " << velocity[1] << ", " << velocity[2] << '\n';
+                if (changed || gamepad_action.stop || (velocity != old_velocity && Clock::now() >= next_velocity_log)) {
+                    std::cout << "Velocity: " << velocity[0] << ", " << velocity[1] << ", " << velocity[2] << '\n';
+                    next_velocity_log = Clock::now()+std::chrono::milliseconds(100);
+                }
                 if (Clock::now() >= next_policy) {
                     g1_policy::State input;
                     for (std::size_t i = 0; i < kJointCount; ++i) {
