@@ -4,7 +4,7 @@
 编译、启动和按键操作见 [Python仿真+C++推理](../cpp/README_g1_parkour.md)。
 下方Python推理和独立rollout仅作离线参考及诊断。
 
-使用指定目录的 `0-depth_encoder.onnx` 和 `actor.onnx`，提供独立 ONNX Runtime CPU
+默认使用仓库 `exported/g1_parkour/` 内的 `0-depth_encoder.onnx` 和 `actor.onnx`，提供独立 ONNX Runtime CPU
 推理模块及 MuJoCo 控制入口。无 Isaac Sim 依赖，不覆盖根目录 `policy.onnx`，不发布 DDS 命令。
 
 ## Python参考推理与独立诊断（可选）
@@ -21,7 +21,7 @@ cd /home/wsy/rl/unitree_mujoco
 /home/wsy/miniconda3/envs/instinctlab/bin/python example/parkour/run_mujoco.py --seconds 10
 # 指定场景、模型目录、三维命令
 /home/wsy/miniconda3/envs/instinctlab/bin/python example/parkour/run_mujoco.py \
-  --model-dir /home/wsy/rl/InstinctLab/logs/instinct_rl/g1_parkour/20260905_091435/exported \
+  --model-dir exported/g1_parkour \
   --scene unitree_robots/g1/scene_29dof.xml --command 0.3 0 0 --seconds 10
 # 自动检查
 /home/wsy/miniconda3/envs/instinctlab/bin/python -m unittest discover -s example/parkour/tests -v

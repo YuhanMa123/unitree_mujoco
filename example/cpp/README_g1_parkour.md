@@ -25,8 +25,8 @@ cmake --build example/cpp/build --target g1_parkour g1_parkour_policy_test -j4
 ```
 
 `--check-policy` 仅离线推理，不初始化 DDS 或发送命令。
-默认模型目录为用户指定的：
-`/home/wsy/rl/InstinctLab/logs/instinct_rl/g1_parkour/20260905_091435/exported`。
+默认加载仓库内的 `exported/g1_parkour/`，包含动作网络和深度编码器。
+模型来源及SHA256见 [模型说明](../../exported/g1_parkour/README.md)。
 默认配置 `example/parkour/g1.json`，支持 `--model-dir` 和 `--config` 覆盖。
 
 ## 2. 启动当前 Python 仿真
@@ -171,5 +171,5 @@ UDP仅绑定/发送到127.0.0.1，协议为小端；Python与C++使用同一份�
 | 画面呈大块色块 | 原始分辨率仅36×64，预览使用最近邻放大；右侧是18×32最新帧 |
 | 暂停仿真后控制器退出 | 观测超时保护的预期行为，恢复仿真后重启控制器 |
 
-模型文件使用外部导出目录，不随本次代码提交复制；换机器时通过`--model-dir`指定路径。
+模型文件已纳入仓库，默认运行不依赖原训练目录；也可通过`--model-dir`加载其他导出目录。
 原有`g1_locomotion`使用根目录`policy.onnx`，与本入口的双网络模型分别运行。

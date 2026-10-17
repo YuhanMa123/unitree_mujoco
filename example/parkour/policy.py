@@ -5,7 +5,7 @@ import json
 import numpy as np
 import onnxruntime as ort
 
-DEFAULT_MODELS = Path('/home/wsy/rl/InstinctLab/logs/instinct_rl/g1_parkour/20260905_091435/exported')
+DEFAULT_MODELS = Path(__file__).resolve().parents[2] / 'exported' / 'g1_parkour'
 
 
 def vector(value, size, name):

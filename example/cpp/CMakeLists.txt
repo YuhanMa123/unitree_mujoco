@@ -37,7 +37,7 @@ if(BUILD_G1_PARKOUR)
     target_link_libraries(g1_parkour unitree_sdk2 yaml-cpp "${ONNXRUNTIME_LIBRARY}")
     target_compile_definitions(g1_parkour PRIVATE
         G1_PARKOUR_DEFAULT_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/../parkour/g1.json"
-        G1_PARKOUR_DEFAULT_MODELS="/home/wsy/rl/InstinctLab/logs/instinct_rl/g1_parkour/20260905_091435/exported")
+        G1_PARKOUR_DEFAULT_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/../../exported/g1_parkour")
     if(UNIX AND NOT APPLE)
         target_link_options(g1_parkour PRIVATE "-Wl,--disable-new-dtags")
     endif()
@@ -47,7 +47,7 @@ if(BUILD_G1_PARKOUR)
         target_include_directories(g1_parkour_policy_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${ONNXRUNTIME_INCLUDE_DIR}")
         target_link_libraries(g1_parkour_policy_test yaml-cpp "${ONNXRUNTIME_LIBRARY}")
         add_test(NAME g1_parkour_policy COMMAND g1_parkour_policy_test
-            "/home/wsy/rl/InstinctLab/logs/instinct_rl/g1_parkour/20260905_091435/exported"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../exported/g1_parkour"
             "${CMAKE_CURRENT_SOURCE_DIR}/../parkour/g1.json")
     endif()
 endif()
