@@ -1,27 +1,25 @@
-# G1 velocity interface from unitree_rl_lab; PD and clipping adapted to user WalkNet1.
-# Source: deploy/robots/g1_29dof/config/policy/velocity/v0/params/deploy.yaml
-# https://github.com/unitreerobotics/unitree_rl_lab (Apache-2.0)
+# DreamWaQ: g1_dwaq/2026-10-15_23-09-27 (params/env.yaml and agent.yaml).
 # joint_ids_map/default_joint_pos/actions use policy order; PD gains use DDS order.
-# WalkNet1 PD arrays were converted from policy order using joint_ids_map.
 joint_ids_map: [0, 6, 12, 1, 7, 13, 2, 8, 14, 3, 9, 15, 22, 4, 10, 16, 23, 5, 11,
   17, 24, 18, 25, 19, 26, 20, 27, 21, 28]
 step_dt: 0.02
-stiffness: [100, 100, 100, 150, 40, 40, 100, 100, 100, 150, 40, 40, 200, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40]
-damping: [2, 2, 2, 4, 2, 2, 2, 2, 2, 4, 2, 2, 5, 5, 5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+stiffness: [50, 75, 50, 100, 40, 40, 50, 75, 50, 100, 40, 40, 100, 75, 75, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40]
+damping: [2.5, 2.5, 2.5, 4, 2, 2, 2.5, 2.5, 2.5, 4, 2, 2, 5, 5, 5, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
 default_joint_pos: [-0.1, -0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3,
   0.3, -0.2, -0.2, 0.25, -0.25, 0.0, 0.0, 0.0, 0.0, 0.97, 0.97, 0.15, -0.15, 0.0,
   0.0, 0.0, 0.0]
 commands:
   base_velocity:
     ranges:
-      lin_vel_x: [-0.5, 1.0]
-      lin_vel_y: [-0.3, 0.3]
-      ang_vel_z: [-0.2, 0.2]
+      lin_vel_x: [-0.6, 1.0]
+      lin_vel_y: [-0.5, 0.5]
+      ang_vel_z: [-1.57, 1.57]
       heading: null
 actions:
   JointPositionAction:
     raw_clip: 100
-    clip: [[-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5], [-5, 5]]
+    clip_action_feedback: true
+    clip: null
     joint_names: [.*]
     scale: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25,
       0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25,
@@ -34,7 +32,7 @@ observations:
   base_ang_vel:
     params: {}
     clip: [-100, 100]
-    scale: [0.2, 0.2, 0.2]
+    scale: [1.0, 1.0, 1.0]
     history_length: 5
   projected_gravity:
     params: {}

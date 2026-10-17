@@ -58,7 +58,7 @@ ctest --test-dir example/cpp/build --output-on-failure
 | 空格 / Ctrl+C | 清零并退出 |
 
 速度按键仅在策略运行时生效，命令会保持到下次按键。命令限幅来自 YAML：
-前向 `[-0.5, 1.0] m/s`、横向 `[-0.3, 0.3] m/s`、转向 `[-0.2, 0.2] rad/s`。
+前向 `[-0.6, 1.0] m/s`、横向 `[-0.5, 0.5] m/s`、转向 `[-1.57, 1.57] rad/s`。
 严格按 `9 → p → r` 操作，复位期间提前按 `r` 会被拒绝。首次进入复位后，
 `9` 在本次进程中永久锁定，不能通过重复上电打断复位或推理。
 推理中可按 `p` 返回复位，完成后再按 `r`。`d` 和 `q` 均为运动按键，不退出或关闭输出。
@@ -87,68 +87,70 @@ python simulate_python/joint_monitor.py
 
 ## 模型接口
 
-参数取自 [unitree_rl_lab 的 G1 velocity 部署配置](https://github.com/unitreerobotics/unitree_rl_lab/blob/main/deploy/robots/g1_29dof/config/policy/velocity/v0/params/deploy.yaml)，
-本地参考版本 `4960b84`。PD 与裁剪已按用户提供的 WalkNet1 配置覆盖。
-`g1_locomotion.yaml` 是可随项目一起使用的参数副本，
-运行不依赖相邻的训练仓库。训练环境参见
-[G1 29DOF locomotion](https://github.com/unitreerobotics/unitree_rl_lab/blob/main/source/unitree_rl_lab/unitree_rl_lab/tasks/locomotion/robots/g1/29dof/velocity_env_cfg.py)。
+当前模型来自：
 
-当前 `policy.onnx` 已包含 `480 → 512 → 256 → 128 → 29` 的网络和 ELU 激活，
-直接执行已导出的网络，不重新创建或训练模型。接口为 float32 `[1,480] → [1,29]`。
+```text
+/home/wsy/rl/lab_isaac3/logs/rsl_rl/g1_dwaq/2026-10-15_23-09-27/exported/policy.onnx
+SHA256: 4f23975849ef66d73a170ee3435a274a4c42dd31830f8b07161add84846a871d
+```
+
+该文件已复制为仓库根目录的 `policy.onnx`，运行时不依赖训练仓库。
+`g1_locomotion.yaml` 按同一训练目录的 `params/env.yaml` 和 `params/agent.yaml`
+同步默认姿态、PD、观测缩放、动作裁剪及命令范围。
+
+这是包含观测归一化和上下文编码器的 DreamWaQ 模型，直接执行导出的网络：
+
+| 张量 | 类型与形状 | 含义 |
+| --- | --- | --- |
+| observation | float32 `[1,96]` | 当前观测 |
+| observation_history | float32 `[1,480]` | 含当前帧的五帧历史 |
+| actions | float32 `[1,29]` | 未缩放的关节动作 |
+
+控制器也支持原来的单输入 `[1,480] → [1,29]` 模型，但更换模型时须配套部署参数。
 
 每帧 96 维观测，严格按以下顺序：
 
 | 观测项 | 维度 | 处理 |
 | --- | --- | --- |
-| base_ang_vel | 3 | IMU 机体系角速度 × 0.2 |
+| base_ang_vel | 3 | IMU 机体系角速度，scale=1 |
 | projected_gravity | 3 | 用 wxyz 四元数把世界重力方向 `[0,0,-1]` 旋转到机体系 |
 | velocity_commands | 3 | 前向、横向、转向命令 |
 | joint_pos_rel | 29 | 策略关节顺序的位置 − 训练默认位置 |
 | joint_vel_rel | 29 | 策略关节顺序的速度 × 0.05 |
-| last_action | 29 | 上一次网络输出的原始动作 |
+| last_action | 29 | 上次动作裁剪到 `[-100,100]` 后的值，未乘 0.25 |
 
-各观测项分别保存 5 帧历史，由旧到新展开后再拼接，得到 480 维。
-**不是**将完整的 96 维帧依次拼接。进入策略时历史用当前观测填充，上次动作清零；
-退出后再次进入会重新初始化。
+观测缩放后裁剪到 `[-100,100]`。各观测项分别保存 5 帧历史，
+由旧到新展开后再拼接，得到 480 维；当前 96 维输入单独按上表拼接。
+进入策略时历史用当前观测填充，上次动作清零；退出后再次进入会重新初始化。
+部署不添加训练时的观测噪声，归一化由 ONNX 网络内部执行。
 
 策略关节顺序通过 `joint_ids_map` 与 DDS 顺序转换。
-目标为 `offset + scale × action`（默认 scale=0.25），每 20 ms 推理一次，
+目标为 `default_joint_pos + 0.25 × clip(action, -100, 100)`，
+与此次训练一致，不再使用旧配置的 `[-5,5] rad` 目标裁剪。
+复位和策略阶段统一从 YAML 读取姿态与 PD；PD 数组使用 DDS 顺序：
+髋 pitch/yaw Kp/Kd=50/2.5、髋 roll 75/2.5、膝 100/4、踝 40/2、
+腰 yaw 100/5、腰 roll/pitch 75/5、肩/肘/腕 40/3。
+
+控制周期 0.002 s，推理周期 0.02 s（训练 dt=0.005、decimation=4）。
 500 Hz 重复发布最近一次目标，由仿真器每个物理步更新 PD 力矩。
-复位和策略阶段统一从 `g1_locomotion.yaml` 读取姿态与 PD，已移除独立 reset XML。
-复位目标使用 `default_joint_pos`，按 `joint_ids_map` 转为 DDS 顺序，PD 直接使用
-DDS 顺序的 `stiffness` 和 `damping`。默认增益与用户提供的 WalkNet1 一致：髋关节 Kp/Kd=100/2、
-膝关节 150/4、踝关节 40/2、腰 yaw 200/5、腰 roll/pitch 40/5、肩/肘/腕 40/1。
-WalkNet1 的 PD 数组按策略顺序解释，再通过 `joint_ids_map` 转换成 DDS 顺序。
-
-WalkNet1 裁剪顺序为：观测先缩放再裁剪到 `[-100,100]`；网络原始动作裁剪到
-`[-100,100]`，再乘动作缩放并加默认位置，最后将关节目标裁剪到 `[-5,5] rad`。
-`last_action` 保留原始网络输出，在送入模型时同样经过观测裁剪。
-
-控制周期保持 0.002 s，推理周期保持 0.02 s（50 Hz）。所贴配置中的
-`PolicyFrequency: 10` 未提供调度实现，未将它直接解释为 10 Hz。
-
-模型没有携带训练参数元数据，输入输出维度一致不能证明训练参数一致。
-当前采用上游 G1 locomotion 观测结构和用户提供的 WalkNet1 PD/裁剪；若训练时修改了默认姿态、PD、
-关节顺序或缩放，应同步提供/替换对应的部署 YAML。程序会校验模型形状、
-关节映射、观测顺序、历史长度和数值有效性。
 
 ## 无界面 MuJoCo 集成检查
 
 在已安装 `mujoco`、`unitree_sdk2py`、`pygame` 和 NumPy 的 Python 环境中执行。
-脚本启动自己的仿真及控制器，默认使用隔离的本机 DDS domain `191`，不需要
-先启动仿真窗口，也不要在该 domain 中运行其他控制器：
+脚本启动自己的仿真及控制器，默认使用隔离的本机 DDS domain `191`，
+不要在该 domain 中运行其他控制器。无需 Isaac Sim。
 
 ```bash
-# 固定浮动基座，验证复位、使能、策略切换、速度输入、返回复位、WASD/QE 运动按键和空格退出
-python example/cpp/tests/g1_locomotion_mujoco_smoke.py
-# 进入策略后将机器人放到地面，验证站立、0.3 m/s 命令下的前移及停止
-python example/cpp/tests/g1_locomotion_mujoco_smoke.py --ground
+# 固定浮动基座，检查复位、策略切换、速度按键和退出
+/home/wsy/miniconda3/envs/unitree/bin/python example/cpp/tests/g1_locomotion_mujoco_smoke.py
+# 落地后检查短时站立、0.3 m/s 前进和停止
+/home/wsy/miniconda3/envs/unitree/bin/python example/cpp/tests/g1_locomotion_mujoco_smoke.py --ground
 ```
 
-本机可使用 `/home/wsy/miniconda3/envs/unitree/bin/python`。
-C++ 单元检查覆盖观测缩放、关节映射、历史排列、重入初始化、原始动作反馈、
-四元数归一化、命令限幅、观测/动作/目标裁剪和非法观测。采用 WalkNet1 PD
-后的地面检查中，0.3 m/s 命令持续约 4 秒，实际前移约 `0.066 m`，使能期间
-基座最低高度约 `0.780 m`。机器人没有倒地，但实际位移明显小于命令对应位移；
-这属于短时冒烟检查，
-未证明完整速度范围内的跟踪精度或长期稳定性。
+C++ 检查覆盖观测缩放、关节映射、历史排列、重入初始化、动作反馈、
+四元数归一化、命令限幅、观测/动作裁剪和非法观测。
+离线默认姿态推理已与独立 Python ONNX Runtime 结果对齐。
+
+此次 DreamWaQ 模型通过固定基座及落地检查：0.3 m/s 命令持续约 4 秒，
+实际前移约 `1.04 m`，检查期间基座最低高度约 `0.770 m`，未倒地。
+这是短时冒烟检查，未验证长期稳定性或完整速度范围的跟踪精度。

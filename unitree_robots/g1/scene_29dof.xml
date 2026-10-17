@@ -1,7 +1,8 @@
 <mujoco model="g1_29dof scene">
   <include file="g1_29dof.xml"/>
+  <include file="terrain_29dof.xml"/>
 
-  <statistic center="0 0 0.5" extent="2.0"/>
+  <statistic center="3 0 0.5" extent="6.0"/>
 
   <visual>
     <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>

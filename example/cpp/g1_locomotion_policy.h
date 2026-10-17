@@ -63,6 +63,7 @@ public:
         if (!action["joint_ids"].IsNull())
             throw std::runtime_error("This interface requires full-joint actions");
         raw_clip_ = action["raw_clip"].as<float>(std::numeric_limits<float>::max());
+        clip_action_feedback_ = action["clip_action_feedback"].as<bool>(false);
         if (!std::isfinite(raw_clip_) || raw_clip_ <= 0)
             throw std::runtime_error("Invalid raw action clip");
         for (int i = 0; i < kJoints; ++i) {
@@ -111,24 +112,43 @@ public:
         options.SetInterOpNumThreads(1);
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         session_ = std::make_unique<Ort::Session>(env_, model.c_str(), options);
-        if (session_->GetInputCount() != 1 || session_->GetOutputCount() != 1)
-            throw std::runtime_error("Expected one policy input and output");
-        auto in_type = session_->GetInputTypeInfo(0);
-        auto out_type = session_->GetOutputTypeInfo(0);
-        auto in = in_type.GetTensorTypeAndShapeInfo();
-        auto out = out_type.GetTensorTypeAndShapeInfo();
-        if (in.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
-            out.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
-            in.GetShape() != std::vector<int64_t>({1, kObservation}) ||
-            out.GetShape() != std::vector<int64_t>({1, kJoints}))
-            throw std::runtime_error("Expected float32 model: [1,480] -> [1,29]");
+        const auto count = session_->GetInputCount();
+        if ((count != 1 && count != 2) || session_->GetOutputCount() != 1)
+            throw std::runtime_error("Expected history input, or current observation and history inputs, and one output");
         Ort::AllocatorWithDefaultOptions allocator;
-        input_name_ = session_->GetInputNameAllocated(0, allocator).get();
+        bool has_frame = false, has_history = false;
+        for (std::size_t i = 0; i < count; ++i) {
+            auto type = session_->GetInputTypeInfo(i);
+            auto info = type.GetTensorTypeAndShapeInfo();
+            const auto shape = info.GetShape();
+            if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+                shape.size() != 2 || shape[0] != 1 ||
+                (shape[1] != kFrame && shape[1] != kObservation))
+                throw std::runtime_error("Expected float32 inputs [1,96] and/or [1,480]");
+            const bool frame = shape[1] == kFrame;
+            if ((frame && has_frame) || (!frame && has_history))
+                throw std::runtime_error("Duplicate policy input shape");
+            has_frame |= frame;
+            has_history |= !frame;
+            input_sizes_.push_back(shape[1]);
+            input_names_.emplace_back(session_->GetInputNameAllocated(i, allocator).get());
+        }
+        if (!has_history || (count == 2 && !has_frame))
+            throw std::runtime_error("Policy requires a history input");
+        auto out_type = session_->GetOutputTypeInfo(0);
+        auto out = out_type.GetTensorTypeAndShapeInfo();
+        if (out.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+            out.GetShape() != std::vector<int64_t>({1, kJoints}))
+            throw std::runtime_error("Expected float32 output [1,29]");
         output_name_ = session_->GetOutputNameAllocated(0, allocator).get();
         Reset();
     }
 
     void Reset() { last_action_.fill(0); initialized_ = false; }
+    const char* Interface() const {
+        return input_names_.size() == 2 ? "float32 [1,96] + [1,480] -> [1,29]"
+                                       : "float32 [1,480] -> [1,29]";
+    }
     Joints DefaultDds() const {
         Joints result{};
         for (int i = 0; i < kJoints; ++i) result[ids_[i]] = default_[i];
@@ -160,9 +180,10 @@ public:
         for (int i = 0; i < kFrame; ++i) {
             frame[i] *= obs_scale_[i];
             if (!std::isfinite(frame[i])) throw std::runtime_error("Non-finite observation");
-            // WalkNet1 clips the scaled observation before model input.
+            // Clip the scaled observation before model input.
             frame[i] = std::clamp(frame[i], obs_clip_[i][0], obs_clip_[i][1]);
         }
+        current_frame_ = frame;
         if (!initialized_) { history_.fill(frame); initialized_ = true; }
         else {
             for (int h = 0; h < kHistory-1; ++h) history_[h] = history_[h+1];
@@ -180,12 +201,17 @@ public:
 
     Joints Step(const State& state, const std::array<float, 3>& velocity) {
         auto observation = Observe(state, velocity);
-        const std::array<int64_t, 2> shape{1, kObservation};
         auto memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        auto tensor = Ort::Value::CreateTensor<float>(memory, observation.data(), observation.size(), shape.data(), shape.size());
-        const char* inputs[]{input_name_.c_str()};
+        std::vector<Ort::Value> tensors;
+        std::vector<const char*> inputs;
+        for (std::size_t i = 0; i < input_names_.size(); ++i) {
+            const std::array<int64_t, 2> shape{1, input_sizes_[i]};
+            float* data = input_sizes_[i] == kFrame ? current_frame_.data() : observation.data();
+            tensors.push_back(Ort::Value::CreateTensor<float>(memory, data, input_sizes_[i], shape.data(), shape.size()));
+            inputs.push_back(input_names_[i].c_str());
+        }
         const char* outputs[]{output_name_.c_str()};
-        auto result = session_->Run(Ort::RunOptions{nullptr}, inputs, &tensor, 1, outputs, 1);
+        auto result = session_->Run(Ort::RunOptions{nullptr}, inputs.data(), tensors.data(), tensors.size(), outputs, 1);
         const auto* actions = result.front().GetTensorData<float>();
         Joints raw{};
         std::copy_n(actions, kJoints, raw.begin());
@@ -196,8 +222,10 @@ public:
         Joints target{};
         for (int i = 0; i < kJoints; ++i) {
             if (!std::isfinite(actions[i])) throw std::runtime_error("Non-finite policy action");
-            last_action_[i] = actions[i]; // raw, unscaled actions are fed back
-            target[ids_[i]] = offset_[i] + scale_[i]*std::clamp(actions[i], -raw_clip_, raw_clip_);
+            const float applied = std::clamp(actions[i], -raw_clip_, raw_clip_);
+            // RSL-RL's environment wrapper clips actions before last_action feedback.
+            last_action_[i] = clip_action_feedback_ ? applied : actions[i];
+            target[ids_[i]] = offset_[i] + scale_[i]*applied;
             if (!std::isfinite(target[ids_[i]])) throw std::runtime_error("Non-finite policy target");
             target[ids_[i]] = std::clamp(target[ids_[i]], target_clip_[i][0], target_clip_[i][1]);
         }
@@ -209,13 +237,17 @@ public:
 private:
     Ort::Env env_;
     std::unique_ptr<Ort::Session> session_;
-    std::string input_name_, output_name_;
+    std::vector<std::string> input_names_;
+    std::vector<int64_t> input_sizes_;
+    std::string output_name_;
+    std::array<float, kFrame> current_frame_{};
     std::array<int, kJoints> ids_{};
     Joints default_{}, scale_{}, offset_{}, last_action_{};
     std::array<float, kFrame> obs_scale_{};
     std::array<std::array<float, 2>, kFrame> obs_clip_{};
     std::array<std::array<float, 2>, kJoints> target_clip_{};
     float raw_clip_ = std::numeric_limits<float>::max();
+    bool clip_action_feedback_ = false;
     std::array<std::array<float, kFrame>, kHistory> history_{};
     std::array<std::array<float, 2>, 3> limits_{};
     bool initialized_ = false;

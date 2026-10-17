@@ -463,7 +463,7 @@ int main(int argc, char** argv) {
             g1_policy::State state;
             state.q = policy.DefaultDds();
             const auto target = policy.Step(state, {0, 0, 0});
-            std::cout << "Policy OK: float32 [1,480] -> [1,29], dt=" << policy.dt << " s\nDDS targets:";
+            std::cout << "Policy OK: " << policy.Interface() << ", dt=" << policy.dt << " s\nDDS targets:";
             for (float q : target) std::cout << ' ' << q;
             std::cout << '\n';
             return 0;

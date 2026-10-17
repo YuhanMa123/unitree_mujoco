@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
         state.quaternion = {std::sqrt(0.5f), 0, std::sqrt(0.5f), 0};
         auto first = policy.Observe(state, {0.1f, 0.2f, -0.1f});
         std::array<float, 96> frame{};
-        frame[0] = 0.2f; frame[1] = 0.4f; frame[2] = 0.6f;
+        frame[0] = 1; frame[1] = 2; frame[2] = 3;
         frame[3] = 1; frame[4] = 0; frame[5] = 0;
         frame[6] = 0.1f; frame[7] = 0.2f; frame[8] = -0.1f;
         for (int i = 0; i < 29; ++i) { frame[9+i] = 0.01f*(ids[i]+1); frame[38+i] = 0.01f*(ids[i]+1); }
@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
         const auto third = policy.Observe(state, {0.3f, 0.2f, -0.1f});
         Near(third[27], 1); Near(third[28], 0); Near(third[29], 0);
         std::array<float, 3> command{100, -100, 100}; policy.ClampVelocity(command);
-        Near(command[0], 1); Near(command[1], -0.3f); Near(command[2], 0.2f);
+        Near(command[0], 1); Near(command[1], -0.5f); Near(command[2], 1.57f);
         // Real model output must round-trip through DDS mapping into last_action.
         policy.Reset(); state = {}; state.q = policy.DefaultDds();
         const auto target = policy.Step(state, {0,0,0});
@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
         state.quaternion = {1,0,0,0}; state.dq[0] = std::numeric_limits<float>::quiet_NaN(); rejected = false;
         try { policy.Step(state, {0,0,0}); } catch (const std::runtime_error&) { rejected = true; }
         if (!rejected) throw std::runtime_error("Non-finite velocity accepted");
-        // WalkNet1 clips scaled observations and raw actions, then joint targets.
+        // Training clips scaled observations and actions, with no joint target clip.
         policy.Reset(); state = {}; state.q = policy.DefaultDds();
         state.omega = {1000, -1000, 0}; state.dq[0] = 4000;
         const auto clipped = policy.Observe(state, {0,0,0});
@@ -64,18 +64,18 @@ int main(int argc, char** argv) {
         g1_policy::Joints raw{};
         raw.fill(200);
         const auto upper = policy.ProcessActions(raw);
-        for (float q : upper) Near(q, 5);
+        for (int i = 0; i < 29; ++i) Near(upper[i], policy.DefaultDds()[i] + 25);
         raw.fill(-200);
         const auto lower = policy.ProcessActions(raw);
-        for (float q : lower) Near(q, -5);
+        for (int i = 0; i < 29; ++i) Near(lower[i], policy.DefaultDds()[i] - 25);
         const auto feedback = policy.Observe(state, {0,0,0});
         for (int i = 0; i < 29; ++i) Near(feedback[335+4*29+i], -100);
         raw.fill(3);
         const auto small = policy.ProcessActions(raw);
         const auto neutral = policy.DefaultDds();
         for (int i = 0; i < 29; ++i) Near(small[i], neutral[i]+0.75f);
-        Near(policy.kp[12], 200); Near(policy.kp[13], 40); Near(policy.kp[14], 40);
-        for (int i = 15; i < 29; ++i) Near(policy.kd[i], 1);
+        Near(policy.kp[12], 100); Near(policy.kp[13], 75); Near(policy.kp[14], 75);
+        for (int i = 15; i < 29; ++i) Near(policy.kd[i], 3);
         std::cout << "Policy observation, history, action mapping, reset and invalid-state checks passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
