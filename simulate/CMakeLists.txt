@@ -46,3 +46,11 @@ link_libraries(
 add_executable(unitree_mujoco ${SIM_SRC} src/main.cc)
 
 add_executable(jstest src/joystick/jstest.cc src/joystick/joystick.cc)
+
+# Share the existing frontend, embedded so the monitor works from any directory.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/../simulate_python/web/joint_monitor.html")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../simulate_python/web/joint_monitor.html" JOINT_MONITOR_HTML)
+configure_file(src/joint_monitor_page.h.in generated/joint_monitor_page.h @ONLY)
+add_executable(joint_monitor src/joint_monitor.cpp)
+target_include_directories(joint_monitor PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")

@@ -13,6 +13,8 @@
 
 #include "param.h"
 #include "physics_joystick.h"
+#include "simulation_reset.h"
+#include <unitree_mujoco/motor_control.h>
 
 #define MOTOR_SENSOR_NUM 3
 
@@ -40,6 +42,8 @@ public:
     }
 
     virtual void start() {}
+    // Call under the simulation mutex before stepping when synchronous PD is required.
+    virtual bool ApplyMotorControl() { return false; }
 
     void printSceneInformation()
     {
@@ -155,7 +159,8 @@ using HighState_t = unitree::robot::go2::publisher::SportModeState;
 using WirelessController_t = unitree::robot::go2::publisher::WirelessController;
 
 public:
-    RobotBridge(mjModel *model, mjData *data) : UnitreeSDK2BridgeBase(model, data)
+    RobotBridge(mjModel *model, mjData *data, std::recursive_mutex* simulation_mutex = nullptr)
+        : UnitreeSDK2BridgeBase(model, data), motor_control_(model), simulation_mutex_(simulation_mutex)
     {
         lowcmd = std::make_shared<LowCmd_t>("rt/lowcmd");
         lowstate = std::make_unique<LowState_t>();
@@ -173,20 +178,26 @@ public:
 
     virtual void run()
     {
+        std::unique_lock<std::recursive_mutex> simulation_lock;
+        if (simulation_mutex_) simulation_lock = std::unique_lock<std::recursive_mutex>(*simulation_mutex_);
         if(!mj_data_) return;
         if(lowstate->joystick) { lowstate->joystick->update(); }
-        // lowcmd
-        {
-            std::lock_guard<std::mutex> lock(lowcmd->mutex_);
-            for(int i(0); i<num_motor_; i++) {
-                auto & m = lowcmd->msg_.motor_cmd()[i];
-                mj_data_->ctrl[i] = m.tau() +
-                                    m.kp() * (m.q() - mj_data_->sensordata[i]) +
-                                    m.kd() * (m.dq() - mj_data_->sensordata[i + num_motor_]);
-            }
-        }
+        // With the viewer, the physics thread owns ctrl and refreshes PD each step.
+        // Standalone/headless callers retain the synchronous run() entry point.
+        if (!simulation_mutex_) ApplyMotorControl();
 
         // lowstate
+        PublishState();
+    }
+
+    bool ApplyMotorControl() override
+    {
+        std::lock_guard<std::mutex> lock(lowcmd->mutex_);
+        return motor_control_.Apply(mj_data_, lowcmd->msg_.motor_cmd());
+    }
+
+    void PublishState()
+    {
         if(lowstate->trylock()) {
             for(int i(0); i<num_motor_; i++) {
                 lowstate->msg_.motor_state()[i].q() = mj_data_->sensordata[i];
@@ -249,7 +260,10 @@ public:
     std::unique_ptr<WirelessController_t> wireless_controller;
     std::shared_ptr<LowCmd_t> lowcmd;
     std::unique_ptr<LowState_t> lowstate;
-    
+
+protected:
+    unitree_mujoco::MotorControl motor_control_;
+    std::recursive_mutex* simulation_mutex_;
 private:
     unitree::common::RecurrentThreadPtr thread_;
 };
@@ -259,7 +273,8 @@ using Go2Bridge = RobotBridge<unitree::robot::go2::subscription::LowCmd, unitree
 class G1Bridge : public RobotBridge<unitree::robot::g1::subscription::LowCmd, unitree::robot::g1::publisher::LowState>
 {
 public:
-    G1Bridge(mjModel *model, mjData *data) : RobotBridge(model, data)
+    G1Bridge(mjModel *model, mjData *data, std::recursive_mutex* simulation_mutex = nullptr)
+        : RobotBridge(model, data, simulation_mutex)
     {
         if (param::config.robot.find("g1") != std::string::npos) {
             auto* g1_lowstate = dynamic_cast<unitree::robot::g1::publisher::LowState*>(lowstate.get());
@@ -277,6 +292,10 @@ public:
 
     void run() override
     {
+        std::unique_lock<std::recursive_mutex> simulation_lock;
+        if (simulation_mutex_) simulation_lock = std::unique_lock<std::recursive_mutex>(*simulation_mutex_);
+        lowstate->msg_.reserve()[0] = unitree_mujoco::kSimulationResetMarker;
+        lowstate->msg_.reserve()[1] = unitree_mujoco::simulation_reset_generation;
         RobotBridge::run();
 
         // secondary IMU state

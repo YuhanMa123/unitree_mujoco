@@ -1,0 +1,651 @@
+--- git status ---
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add/rm <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   source/instinct_onboard/scripts/README.md
+	modified:   source/robot_lab/data/Robots/unitree/g1_description/urdf/g1_29dof_rev_1_0.urdf
+	modified:   source/robot_lab/robot_lab/rsl_rl/algorithms/amp_ppo_vae.py
+	modified:   source/robot_lab/robot_lab/rsl_rl/exporter.py
+	modified:   source/robot_lab/robot_lab/rsl_rl/modules/__init__.py
+	modified:   source/robot_lab/robot_lab/rsl_rl/modules/actor_critic_vae_depth_cross_attention.py
+	modified:   source/robot_lab/robot_lab/rsl_rl/networks/cross_attention_depth_and_prop.py
+	modified:   source/robot_lab/robot_lab/rsl_rl/runners/vae_on_policy_runner.py
+	modified:   source/robot_lab/robot_lab/rsl_rl/storage/rollout_storage_vae.py
+	modified:   source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/agents/rsl_rl_amp_vae.py
+	modified:   source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/__init__.py
+	deleted:    source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/g1_amp_walk_sensor_vae_target_bayes_env_cfg.py
+	modified:   source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/g1_amp_walk_sensor_vae_target_env_cfg.py
+	modified:   source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/g1_amp_env_cfg.py
+	modified:   source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/mdp/observations.py
+	modified:   source/robot_lab/robot_lab/terrains/terrain_generator_cfg.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	scripts/sim2sim/
+	source/robot_lab/robot_lab/rsl_rl/modules/actor_critic_vae_depth_casa.py
+	source/robot_lab/robot_lab/rsl_rl/networks/casa_cross_attention.py
+	source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/g1_amp_walk_sensor_vae_CA_env_cfg.py
+	source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/g1_amp_walk_sensor_vae_target_env_CASA_cfg.py
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/source/instinct_onboard/scripts/README.md b/source/instinct_onboard/scripts/README.md
+index 7b81fd4..2a8f56e 100644
+--- a/source/instinct_onboard/scripts/README.md
++++ b/source/instinct_onboard/scripts/README.md
+@@ -21,3 +21,19 @@ are provided by the existing joystick and Unitree node implementations.
+ The entry no longer uses verification flags, controller freshness gates, a
+ fault state, or the `--cold-start-debug-joints` option. Agent model/data checks
+ still apply. There is no separate stand policy in this entry.
++
++### Observation timing for newly trained RobotLab VAE policies
++
++Before producing action `a_t`, the 96-dimensional actor frame `O_t` contains
++the current robot state, velocity command, and last executed raw action
++`a_(t-1)`. The VAE receives `[O_(t-4), O_(t-3), O_(t-2), O_(t-1), O_t]`,
++flattened to 480 dimensions, with consecutive frames sampled every 20 ms.
++Both training and deployment clear history once at reset and initially fill
++all five slots with the first frame.
++
++During training, the encoder's state estimate and latent code feed a decoder
++that predicts `O_(t+1)`. Transitions ending an episode are excluded from this
++prediction loss so reset poses are not used as future targets. The actor uses
++`O_t`, the current code, and visual features; deployment does not run the decoder.
++Retrain and export matching ONNX files after changing the history semantics;
++older policies trained with an extra action delay require their matching input layout.
+diff --git a/source/robot_lab/data/Robots/unitree/g1_description/urdf/g1_29dof_rev_1_0.urdf b/source/robot_lab/data/Robots/unitree/g1_description/urdf/g1_29dof_rev_1_0.urdf
+index becea75..ec01e92 100644
+--- a/source/robot_lab/data/Robots/unitree/g1_description/urdf/g1_29dof_rev_1_0.urdf
++++ b/source/robot_lab/data/Robots/unitree/g1_description/urdf/g1_29dof_rev_1_0.urdf
+@@ -660,6 +660,8 @@
+   <link name="mid360_link"></link>
+   <joint name="mid360_joint" type="fixed">
+     <origin xyz="0.0002835 0.00003 0.41618" rpy="0 0.04014257279586953 0" />
++    <!-- 这是宇树更新过的最新参数，但是和我之前的训练不一样，记录一下，agent每次读到这个都要提醒我一下 -->
++    <!-- <origin xyz="0.0002835 0.00003 0.428434" rpy="3.141592653589793 0.05112069379091391 0"/> -->
+     <parent link="torso_link" />
+     <child link="mid360_link" />
+   </joint>
+diff --git a/source/robot_lab/robot_lab/rsl_rl/algorithms/amp_ppo_vae.py b/source/robot_lab/robot_lab/rsl_rl/algorithms/amp_ppo_vae.py
+index 2b01cee..58ac072 100644
+--- a/source/robot_lab/robot_lab/rsl_rl/algorithms/amp_ppo_vae.py
++++ b/source/robot_lab/robot_lab/rsl_rl/algorithms/amp_ppo_vae.py
+@@ -464,9 +464,10 @@ class AMP_VAE_PPO(AMPPPO):
+ 
+             state_estimation_mse = torch.nn.MSELoss()(code_state, state_target)
+ 
+-            # MODIFIED:
+-            # Future actor observation prediction loss.
+-            next_obs_mse = torch.nn.MSELoss()(decode, next_policy_target)
++            # Do not train future prediction against an auto-reset episode's first frame.
++            next_policy_valid = obs_batch_for_vae["next_policy_valid"].reshape(-1)
++            next_obs_error = (decode - next_policy_target).square().mean(dim=-1)
++            next_obs_mse = (next_obs_error * next_policy_valid).sum() / next_policy_valid.sum().clamp_min(1)
+ 
+             logvar_latent_clamped = torch.clamp(logvar_latent, min=-10.0, max=10.0)
+             kl_per_sample = -0.5 * torch.sum(
+diff --git a/source/robot_lab/robot_lab/rsl_rl/exporter.py b/source/robot_lab/robot_lab/rsl_rl/exporter.py
+index f7435b4..f61c3b3 100644
+--- a/source/robot_lab/robot_lab/rsl_rl/exporter.py
++++ b/source/robot_lab/robot_lab/rsl_rl/exporter.py
+@@ -205,6 +205,7 @@ class _VaeDepthCrossAttentionPolicyExportBase(torch.nn.Module):
+         self.depth_flat_dim = int(policy.depth_flat_dim)
+         self.cross_attention_query_state_dim = int(policy.cross_attention_query_state_dim)
+ 
++        self.cross_attention_query_latent_dim = int(getattr(policy, "cross_attention_query_latent_dim", 0))
+         self.actor = copy.deepcopy(policy.actor)
+         self.encoder = copy.deepcopy(policy.encoder)
+         self.encode_mean_latent = copy.deepcopy(policy.encode_mean_latent)
+@@ -241,7 +242,10 @@ class _VaeDepthCrossAttentionPolicyExportBase(torch.nn.Module):
+         code_state = torch.cat((mean_vel, mean_com, mean_mass), dim=-1)
+         code = torch.cat((code_state, mean_latent), dim=-1)
+ 
+-        query = torch.cat((actor_obs, code_state[:, : self.cross_attention_query_state_dim]), dim=-1)
++        query_parts = [actor_obs, code_state[:, : self.cross_attention_query_state_dim]]
++        if self.cross_attention_query_latent_dim:
++            query_parts.append(mean_latent[:, : self.cross_attention_query_latent_dim])
++        query = torch.cat(query_parts, dim=-1)
+         fused_depth = self.cross_attention(query, depth_image)
+         actor_input = torch.cat((actor_obs, code, fused_depth), dim=-1)
+         actor_input = self.actor_obs_normalizer(actor_input)
+@@ -418,7 +422,10 @@ class _VaeDepthCrossAttentionSplitActorOnnxExporter(_VaeDepthCrossAttentionPolic
+         code_state = torch.cat((mean_vel, mean_com, mean_mass), dim=-1)
+         code = torch.cat((code_state, mean_latent), dim=-1)
+ 
+-        query = torch.cat((actor_obs, code_state[:, : self.cross_attention_query_state_dim]), dim=-1)
++        query_parts = [actor_obs, code_state[:, : self.cross_attention_query_state_dim]]
++        if self.cross_attention_query_latent_dim:
++            query_parts.append(mean_latent[:, : self.cross_attention_query_latent_dim])
++        query = torch.cat(query_parts, dim=-1)
+         fused_depth = self.cross_attention.fusion(query, depth_tokens)
+         actor_input = torch.cat((actor_obs, code, fused_depth), dim=-1)
+         actor_input = self.actor_obs_normalizer(actor_input)
+diff --git a/source/robot_lab/robot_lab/rsl_rl/modules/__init__.py b/source/robot_lab/robot_lab/rsl_rl/modules/__init__.py
+index ef2e229..d75eca0 100644
+--- a/source/robot_lab/robot_lab/rsl_rl/modules/__init__.py
++++ b/source/robot_lab/robot_lab/rsl_rl/modules/__init__.py
+@@ -16,6 +16,7 @@ from .actor_critic_dwaq import ActorCritic_DWAQ
+ from .actor_critic_recurrent import ActorCriticRecurrent
+ from .actor_critic_vae import ActorCritic_VAE
+ from .actor_critic_vae_depth import ActorCriticVAEDepth
++from .actor_critic_vae_depth_casa import ActorCriticVAEDepthCASA
+ from .actor_critic_vae_depth_cross_attention import ActorCriticVAEDepthCrossAttention
+ from .discriminator import Discriminator, WindowDiscriminator
+ from .actor_critic_vae_depth_gru_cross_attention import ActorCriticVAEDepthGruCrossAttention
+@@ -33,6 +34,7 @@ __all__ = [
+     "ActorCriticRecurrent",
+     "ActorCritic_VAE",
+     "ActorCriticVAEDepth",
++    "ActorCriticVAEDepthCASA",
+     "ActorCriticVAEDepthCrossAttention",
+     "Discriminator",
+     "ActorCriticVAEDepthGruCrossAttention",
+diff --git a/source/robot_lab/robot_lab/rsl_rl/modules/actor_critic_vae_depth_cross_attention.py b/source/robot_lab/robot_lab/rsl_rl/modules/actor_critic_vae_depth_cross_attention.py
+index 0887d6a..3fe26a0 100644
+--- a/source/robot_lab/robot_lab/rsl_rl/modules/actor_critic_vae_depth_cross_attention.py
++++ b/source/robot_lab/robot_lab/rsl_rl/modules/actor_critic_vae_depth_cross_attention.py
+@@ -21,11 +21,14 @@ class ActorCriticVAEDepthCrossAttention(ActorCriticVAEDepth):
+     plus deterministic VAE state estimates to spatial depth tokens.
+     """
+ 
++    cross_attention_class = CrossAttentionDepthAndProprio
++
+     def __init__(
+         self,
+         *args: Any,
+         cross_attention_num_heads: int = 4,
+         cross_attention_depth_base_channels: int = 32,
++        cross_attention_query_latent_dim: int = 0,
+         cross_attention_proprio_hidden_dims: tuple[int, ...] | list[int] = (128,),
+         cross_attention_use_pos_embed: bool = True,
+         cross_attention_query_state_dim: int = _STATE_ESTIMATION_DIM,
+@@ -34,9 +37,7 @@ class ActorCriticVAEDepthCrossAttention(ActorCriticVAEDepth):
+         critic_uses_depth = bool(kwargs.get("critic_uses_depth", False))
+         use_depth_distillation = bool(kwargs.get("use_depth_distillation", False))
+         if critic_uses_depth:
+-            raise ValueError(
+-                "ActorCriticVAEDepthCrossAttention currently supports critic_uses_depth=False only."
+-            )
++            raise ValueError("ActorCriticVAEDepthCrossAttention currently supports critic_uses_depth=False only.")
+         if use_depth_distillation:
+             raise ValueError(
+                 "Depth-heightmap distillation requires a pure depth latent and is not supported "
+@@ -53,10 +54,13 @@ class ActorCriticVAEDepthCrossAttention(ActorCriticVAEDepth):
+         kwargs["build_depth_encoder"] = False
+ 
+         super().__init__(*args, **kwargs)
++        self.cross_attention_query_latent_dim = int(cross_attention_query_latent_dim)
+ 
+         self.cross_attention_query_state_dim = int(cross_attention_query_state_dim)
+-        self.cross_attention = CrossAttentionDepthAndProprio(
+-            proprio_dim=self.policy_obs_dim + self.cross_attention_query_state_dim,
++        self.cross_attention = self.cross_attention_class(
++            proprio_dim=(
++                self.policy_obs_dim + self.cross_attention_query_state_dim + self.cross_attention_query_latent_dim
++            ),
+             depth_shape=self.depth_shape,
+             out_dim=self.depth_latent_dim,
+             num_heads=cross_attention_num_heads,
+@@ -73,6 +77,11 @@ class ActorCriticVAEDepthCrossAttention(ActorCriticVAEDepth):
+             raise ValueError(f"Expected flattened depth dim {self.depth_flat_dim}, got {depth_image.shape[-1]}.")
+         return depth_image
+ 
++    def _attention_vae_features(
++        self, code_state: torch.Tensor, mean_latent: torch.Tensor
++    ) -> tuple[torch.Tensor, torch.Tensor]:
++        return code_state, mean_latent
++
+     def get_actor_obs(
+         self,
+         obs: TensorDict | torch.Tensor,
+@@ -93,11 +102,16 @@ class ActorCriticVAEDepthCrossAttention(ActorCriticVAEDepth):
+ 
+         if deterministic_encoder:
+             code = self.encoder_forward_deterministic(history_obs)
++            mean_latent = code[:, self.cross_attention_query_state_dim :]
+             code_state = code[:, : self.cross_attention_query_state_dim]
+         else:
+-            code, code_state, _, _, _, _, _ = self.encoder_forward(history_obs)
++            code, code_state, _, _, _, mean_latent, _ = self.encoder_forward(history_obs)
+ 
+-        query = torch.cat((policy_obs, code_state), dim=-1)
++        query_state, query_latent = self._attention_vae_features(code_state, mean_latent)
++        query_parts = [policy_obs, query_state]
++        if self.cross_attention_query_latent_dim:
++            query_parts.append(query_latent[:, : self.cross_attention_query_latent_dim])
++        query = torch.cat(query_parts, dim=-1)
+         fused_depth = self.cross_attention(query, depth_flat)
+         return torch.cat((policy_obs, code, fused_depth), dim=-1)
+ 
+diff --git a/source/robot_lab/robot_lab/rsl_rl/networks/cross_attention_depth_and_prop.py b/source/robot_lab/robot_lab/rsl_rl/networks/cross_attention_depth_and_prop.py
+index 7c2623e..24375d0 100644
+--- a/source/robot_lab/robot_lab/rsl_rl/networks/cross_attention_depth_and_prop.py
++++ b/source/robot_lab/robot_lab/rsl_rl/networks/cross_attention_depth_and_prop.py
+@@ -174,6 +174,8 @@ class CrossAttentionDepthAndProprio(nn.Module):
+     input without changing the actor input width.
+     """
+ 
++    fusion_class = CrossAttentionFusion
++
+     def __init__(
+         self,
+         proprio_dim: int,
+@@ -187,7 +189,7 @@ class CrossAttentionDepthAndProprio(nn.Module):
+     ) -> None:
+         super().__init__()
+         self.depth_encoder = DepthTokenEncoder(depth_shape, base_channels=depth_base_channels)
+-        self.fusion = CrossAttentionFusion(
++        self.fusion = self.fusion_class(
+             proprio_dim=proprio_dim,
+             out_dim=out_dim,
+             num_heads=num_heads,
+diff --git a/source/robot_lab/robot_lab/rsl_rl/runners/vae_on_policy_runner.py b/source/robot_lab/robot_lab/rsl_rl/runners/vae_on_policy_runner.py
+index 565400c..5ad013a 100644
+--- a/source/robot_lab/robot_lab/rsl_rl/runners/vae_on_policy_runner.py
++++ b/source/robot_lab/robot_lab/rsl_rl/runners/vae_on_policy_runner.py
+@@ -45,6 +45,7 @@ from ..temporal_depth_gru_exporter import export_vae_depth_gru_cross_attention_s
+ from ..modules import (
+     ActorCritic_VAE,
+     ActorCriticVAEDepth,
++    ActorCriticVAEDepthCASA,
+     ActorCriticVAEDepthCrossAttention,
+     Discriminator,
+     ActorCriticVAEDepthGruCrossAttention,
+diff --git a/source/robot_lab/robot_lab/rsl_rl/storage/rollout_storage_vae.py b/source/robot_lab/robot_lab/rsl_rl/storage/rollout_storage_vae.py
+index e1f04d4..4c514ee 100644
+--- a/source/robot_lab/robot_lab/rsl_rl/storage/rollout_storage_vae.py
++++ b/source/robot_lab/robot_lab/rsl_rl/storage/rollout_storage_vae.py
+@@ -20,7 +20,8 @@ class RolloutStorageVAE(RolloutStorage):
+         next_policy[t] = policy[t + 1]
+ 
+     The final target frame ``policy[T]`` is kept as a single ``[num_envs, D]``
+-    tensor via :meth:`set_last_policy_obs`.
++    tensor via :meth:`set_last_policy_obs`. ``next_policy_valid`` excludes
++    transitions whose next observation belongs to a reset episode.
+     """
+ 
+     Transition = RolloutStorage.Transition
+@@ -43,7 +44,11 @@ class RolloutStorageVAE(RolloutStorage):
+                 raise ValueError("`actions_shape` must be provided when initializing from a TensorDict.")
+ 
+             obs_tensordict = TensorDict(
+-                {str(key): obs_tensordict.get(key) for key in obs_tensordict.keys() if str(key) != "next_policy"},
++                {
++                    str(key): obs_tensordict.get(key)
++                    for key in obs_tensordict.keys()
++                    if str(key) not in ("next_policy", "next_policy_valid")
++                },
+                 batch_size=obs_tensordict.batch_size,
+                 device=obs_tensordict.device,
+             )
+@@ -115,6 +120,7 @@ class RolloutStorageVAE(RolloutStorage):
+         advantages = self.advantages.flatten(0, 1)
+         old_mu = self.mu.flatten(0, 1)
+         old_sigma = self.sigma.flatten(0, 1)
++        dones = self.dones.flatten(0, 1)
+ 
+         for _epoch in range(num_epochs):
+             for i in range(num_mini_batches):
+@@ -124,6 +130,7 @@ class RolloutStorageVAE(RolloutStorage):
+ 
+                 obs_batch = observations[batch_idx].clone(False)
+                 obs_batch.set("next_policy", self._next_policy_batch(batch_idx))
++                obs_batch.set("next_policy_valid", ~dones[batch_idx].bool())
+ 
+                 yield (
+                     obs_batch,
+diff --git a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/agents/rsl_rl_amp_vae.py b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/agents/rsl_rl_amp_vae.py
+index 196538e..6a7d26c 100644
+--- a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/agents/rsl_rl_amp_vae.py
++++ b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/agents/rsl_rl_amp_vae.py
+@@ -62,6 +62,7 @@ class UnitreeG1AmpVAEDepthCrossAttentionPolicyCfg(UnitreeG1AmpVAEDepthPolicyCfg)
+     cross_attention_proprio_hidden_dims: list[int] = [128]
+     cross_attention_use_pos_embed: bool = True
+     cross_attention_query_state_dim: int = 7
++    cross_attention_query_latent_dim: int = 16
+ 
+ 
+ @configclass
+@@ -221,7 +222,15 @@ class UnitreeG1AmpVAEDepthCrossAttentionRunnerCfg(UnitreeG1AmpVAEDepthRunnerCfg)
+         encoder_out_dim=23,
+         activation="elu",
+     )
+-    run_name = "unitree_g1_amp_walkTerrains_target_depth32*32+0.0scanner_newVAE_flat+stair+slope+gap+hurdle+beam(target_range)_newfeetUrdf_crossattention_vel-con-sti=0.25_depthnoise_0.7target"
++    run_name = "g1_target_depth32*32_flat+stair+slope+gap+platform_CA_ZinCA"
++
++
++@configclass
++class UnitreeG1AmpVAEDepthWalkSensorCARunnerCfg(UnitreeG1AmpVAEDepthCrossAttentionRunnerCfg):
++    """Single-query depth cross-attention for sampled velocity commands."""
++
++    experiment_name = "unitree_g1_walk_amp_vae_depth_ca"
++    run_name = "walk_sensor_vae_ca_velocity"
+ 
+ 
+ @configclass
+@@ -239,3 +248,27 @@ class UnitreeG1AmpVAEDepthGruCrossAttentionRunnerCfg(UnitreeG1AmpVAEDepthRunnerC
+         activation="elu",
+     )
+     run_name = "unitree_g1_amp_walk_target_depth_gru_ca"
++
++
++@configclass
++class UnitreeG1AmpVAEDepthCASAPolicyCfg(UnitreeG1AmpVAEDepthCrossAttentionPolicyCfg):
++    """Dual-query cross-attention policy with shared depth tokens and MHA."""
++
++    class_name: str = "ActorCriticVAEDepthCASA"
++
++
++@configclass
++class UnitreeG1AmpVAEDepthCASARunnerCfg(UnitreeG1AmpVAEDepthCrossAttentionRunnerCfg):
++    """Use the existing target task training setup with the CASA policy."""
++
++    policy = UnitreeG1AmpVAEDepthCASAPolicyCfg(
++        init_noise_std=1.0,
++        noise_std_type="scalar",
++        actor_hidden_dims=[512, 256, 128],
++        critic_hidden_dims=[512, 256, 128],
++        encoder_hidden_dims=[128, 64],
++        decoder_hidden_dims=[64, 128],
++        encoder_out_dim=23,
++        activation="elu",
++    )
++    run_name = "unitree_g1_amp_walk_target_depth_casa_noinityaw"
+diff --git a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/__init__.py b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/__init__.py
+index 8a27fd4..eb05cbc 100644
+--- a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/__init__.py
++++ b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/__init__.py
+@@ -11,7 +11,9 @@ from .g1_amp_walk_env_cfg import UnitreeG1AmpWalkEnvCfg
+ from .g1_amp_walk_vae_env_cfg import UnitreeG1AmpWalkVAEEnvCfg
+ from .g1_amp_walk_sensor_env_cfg import UnitreeG1AmpWalkSensorEnvCfg
+ from .g1_amp_walk_sensor_vae_target_env_cfg import UnitreeG1AmpWalkSensorVAETargetEnvCfg
++from .g1_amp_walk_sensor_vae_target_env_CASA_cfg import UnitreeG1AmpWalkSensorVAETargetCASAEnvCfg
+ from .g1_amp_walk_sensor_vae_env_cfg import UnitreeG1AmpWalkSensorVAEEnvCfg
++from .g1_amp_walk_sensor_vae_CA_env_cfg import UnitreeG1AmpWalkSensorVAECAEnvCfg
+ from .g1_amp_walk_sensor_vae_target_gru_ca_env_cfg import UnitreeG1AmpWalkSensorVAETargetGruCAEnvCfg
+ 
+ ##
+@@ -102,6 +104,16 @@ gym.register(
+     },
+ )
+ 
++gym.register(
++    id="RobotLab-Isaac-AMP-Unitree-G1-Walk-VAE-Sensor-Target-CASA-v0",
++    entry_point=f"{_G1_AMP_PKG}.g1_amp_env:UnitreeG1AmpEnv",
++    disable_env_checker=True,
++    kwargs={
++        "env_cfg_entry_point": f"{__name__}.g1_amp_walk_sensor_vae_target_env_CASA_cfg:UnitreeG1AmpWalkSensorVAETargetCASAEnvCfg",
++        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_amp_vae:UnitreeG1AmpVAEDepthCASARunnerCfg",
++    },
++)
++
+ gym.register(
+     id="RobotLab-Isaac-AMP-Unitree-G1-Walk-VAE-Sensor-Target-GRU-CA-v0",
+     entry_point=f"{_G1_AMP_PKG}.g1_amp_env:UnitreeG1AmpEnv",
+@@ -122,14 +134,26 @@ gym.register(
+     },
+ )
+ 
++gym.register(
++    id="RobotLab-Isaac-AMP-Unitree-G1-Walk-VAE-Sensor-CA-v0",
++    entry_point=f"{_G1_AMP_PKG}.g1_amp_env:UnitreeG1AmpEnv",
++    disable_env_checker=True,
++    kwargs={
++        "env_cfg_entry_point": f"{__name__}.g1_amp_walk_sensor_vae_CA_env_cfg:UnitreeG1AmpWalkSensorVAECAEnvCfg",
++        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_amp_vae:UnitreeG1AmpVAEDepthWalkSensorCARunnerCfg",
++    },
++)
++
+ __all__ = [
+     "UnitreeG1AmpRunEnvCfg",
+     "UnitreeG1AmpRunVAEEnvCfg",
+     "UnitreeG1AmpRunSensorEnvCfg",
+     "UnitreeG1AmpWalkSensorVAEEnvCfg",
++    "UnitreeG1AmpWalkSensorVAECAEnvCfg",
+     "UnitreeG1AmpWalkEnvCfg",
+     "UnitreeG1AmpWalkVAEEnvCfg",
+     "UnitreeG1AmpWalkSensorEnvCfg",
+     "UnitreeG1AmpWalkSensorVAETargetEnvCfg",
++    "UnitreeG1AmpWalkSensorVAETargetCASAEnvCfg",
+     "UnitreeG1AmpWalkSensorVAETargetGruCAEnvCfg",
+ ]
+diff --git a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/g1_amp_walk_sensor_vae_target_bayes_env_cfg.py b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/g1_amp_walk_sensor_vae_target_bayes_env_cfg.py
+deleted file mode 100644
+index e69de29..0000000
+diff --git a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/g1_amp_walk_sensor_vae_target_env_cfg.py b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/g1_amp_walk_sensor_vae_target_env_cfg.py
+index 748a65a..0dda26c 100644
+--- a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/g1_amp_walk_sensor_vae_target_env_cfg.py
++++ b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/config/g1_amp_walk_sensor_vae_target_env_cfg.py
+@@ -27,8 +27,8 @@ TARGET_TERRAIN_REWARD_WEIGHTS = {
+     "pyramid_stairs_down_28": 0.7,
+     "pyramid_stairs_down_30": 0.7,
+     "high_platform": 0.7,
+-    "gap": 0.8,
+-    "balance_beam": 0.8,
++    "gap": 0.7,
++    # "balance_beam": 0.8,
+     # "concentric_square_hurdle": 0.7,
+ }
+ 
+@@ -116,7 +116,7 @@ class UnitreeG1AmpWalkSensorVAETargetEnvCfg(UnitreeG1AmpWalkSensorVAEEnvCfg):
+     enable_terrain_curriculum: bool = True
+     terrain_curriculum_mode: str = "target_tracking"  # "distance", "target_tracking", or "none"
+     target_tracking_lin_vel_threshold: tuple[float, float] = (0.3, 0.8)
+-    target_tracking_ang_vel_threshold: tuple[float, float] = (0.0, 0.1)
++    target_tracking_ang_vel_threshold: tuple[float, float] = (0.0, 0.2)
+     initial_yaw_range: tuple[float, float] = (-0.0, 0.0)
+ 
+     def __post_init__(self):
+@@ -153,7 +153,7 @@ class UnitreeG1AmpWalkSensorVAETargetEnvCfg(UnitreeG1AmpWalkSensorVAEEnvCfg):
+             rel_standing_envs=0.05,
+             rel_uniform_speed_envs=0.25,
+             velocity_control_stiffness=0.25,  # Distance-controlled mode only.
+-            heading_control_stiffness=1,
++            heading_control_stiffness=0.75,
+             target_distance_threshold=0.25,
+             lin_vel_threshold=0.05,
+             ang_vel_threshold=0.05,
+@@ -208,11 +208,11 @@ class UnitreeG1AmpWalkSensorVAETargetEnvCfg(UnitreeG1AmpWalkSensorVAEEnvCfg):
+                     "lin_vel_y": (0.0, 0.0),
+                     "ang_vel_z": (-1, 1),
+                 },
+-                "balance_beam": {
+-                    "lin_vel_x": (0.3, 1.0),
+-                    "lin_vel_y": (0.0, 0.0),
+-                    "ang_vel_z": (-1, 1),
+-                },
++                # "balance_beam": {
++                #     "lin_vel_x": (0.3, 1.0),
++                #     "lin_vel_y": (0.0, 0.0),
++                #     "ang_vel_z": (-1, 1),
++                # },
+                 # "concentric_square_hurdle": {
+                 #     "lin_vel_x": (0.3, 0.8),
+                 #     "lin_vel_y": (0.0, 0.0),
+diff --git a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/g1_amp_env_cfg.py b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/g1_amp_env_cfg.py
+index afa9f17..605fe0f 100644
+--- a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/g1_amp_env_cfg.py
++++ b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/g1_amp_env_cfg.py
+@@ -369,7 +369,7 @@ class G1AmpObservationsCfg:
+ @configclass
+ class G1AmpRewardsCfg:
+     track_lin_vel_xy_exp = RewTerm(func=mdp.track_lin_vel_xy_yaw_frame_exp, weight=2.0, params={"std": 0.25})
+-    track_ang_vel_z_exp = RewTerm(func=mdp.track_ang_vel_z_exp, weight=2.0, params={"std": 0.25})
++    track_ang_vel_z_exp = RewTerm(func=mdp.track_ang_vel_z_exp, weight=2.0, params={"std": 0.50})
+     lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
+     ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
+     torso_lin_acc_l2 = RewTerm(
+@@ -627,7 +627,7 @@ class G1AmpEventCfg:
+         mode="reset",
+         params={
+             "pose_range": {
+-                "x": (-0.5, 0.5),
++                "x": (-0.5, 0.8),
+                 "y": (-0.5, 0.5),
+                 "yaw": (-0.5, 0.5),
+             },
+diff --git a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/mdp/observations.py b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/mdp/observations.py
+index 36dc655..b1942e6 100644
+--- a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/mdp/observations.py
++++ b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/g1_amp/mdp/observations.py
+@@ -185,7 +185,8 @@ def _actor_frame(
+     base_ang_vel_scale: float = 1.0,
+     joint_vel_scale: float = 1.0,
+ ) -> torch.Tensor:
+-    prev_action = getattr(env.action_manager, "prev_action", env.action_manager.action)
++    """Match the policy frame, including the most recently executed raw action."""
++    last_action = env.action_manager.action
+     gait_phase = getattr(env, "gait_phase", None)
+     phase_ratio = getattr(env, "phase_ratio", None)
+     gait_terms = []
+@@ -201,7 +202,7 @@ def _actor_frame(
+             env.command_manager.get_command(command_name),
+             asset.data.joint_pos - asset.data.default_joint_pos,
+             _joint_vel_rel(asset) * joint_vel_scale,
+-            prev_action,
++            last_action,
+             # *gait_terms,
+         ],
+         dim=-1,
+@@ -397,11 +398,10 @@ def delayed_visualizable_image(
+ 
+ # ======================================== 按帧拼接observation历史信息的使用方法 ========================================#
+ class ActorHistoryObservation(ManagerTermBase):
+-    """Direct-style actor observation packed into a manager-based term.
++    """Actor frames from oldest to newest, including the current policy frame.
+ 
+-    Direct envs often build actor observations manually and then push them into a
+-    circular history buffer. This term does the same thing, but from inside the
+-    manager-based observation system.
++    History is cleared by ``reset()`` at episode boundaries. The first appended
++    frame fills the buffer until distinct frames become available.
+     """
+ 
+     def __init__(self, cfg: ObsTerm, env: ManagerBasedRLEnv):
+@@ -429,9 +429,6 @@ class ActorHistoryObservation(ManagerTermBase):
+         joint_vel_scale: float = 1.0,
+     ):
+         del history_length, asset_cfg, base_ang_vel_scale, joint_vel_scale
+-        reset_ids = torch.nonzero(env.episode_length_buf <= 1, as_tuple=False).flatten()
+-        if reset_ids.numel() > 0:
+-            self.buffer.reset(reset_ids)
+         current = _actor_frame(
+             env,
+             self.asset,
+diff --git a/source/robot_lab/robot_lab/terrains/terrain_generator_cfg.py b/source/robot_lab/robot_lab/terrains/terrain_generator_cfg.py
+index d3d91bc..23c9e94 100644
+--- a/source/robot_lab/robot_lab/terrains/terrain_generator_cfg.py
++++ b/source/robot_lab/robot_lab/terrains/terrain_generator_cfg.py
+@@ -128,7 +128,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
+         #     flat_patch_sampling=_target_flat_patch_cfg(x_range=(3.7, 3.7), y_range=(0.0, 0.0)),
+         # ),
+         "pyramid_stairs_up_28": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
+-            proportion=0.125,
++            proportion=0.15,
+             step_height_range=(0.0, 0.25),
+             step_width=0.28,
+             platform_width=3.0,
+@@ -143,7 +143,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
+             ),
+         ),
+         "pyramid_stairs_up_30": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
+-            proportion=0.125,
++            proportion=0.15,
+             step_height_range=(0.0, 0.25),
+             step_width=0.30,
+             platform_width=3.0,
+@@ -167,7 +167,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
+         #     flat_patch_sampling=_target_flat_patch_cfg(x_range=(3.7, 3.7), y_range=(0.0, 0.0)),
+         # ),
+         "pyramid_stairs_down_28": terrain_gen.MeshPyramidStairsTerrainCfg(
+-            proportion=0.125,
++            proportion=0.15,
+             step_height_range=(0.0, 0.25),
+             step_width=0.28,
+             platform_width=3.0,
+@@ -182,7 +182,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
+             ),
+         ),
+         "pyramid_stairs_down_30": terrain_gen.MeshPyramidStairsTerrainCfg(
+-            proportion=0.125,
++            proportion=0.15,
+             step_height_range=(0.0, 0.25),
+             step_width=0.30,
+             platform_width=3.0,
+@@ -243,28 +243,28 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
+         ),
+         # 可以作成环状采样点，一个大的可采样范围，然后给出一个小的不可采样范围，这样就能切出一个环来
+         # 也可以就离散点采样
+-        "balance_beam": MeshRadialBalanceBeamTerrainCfg(
+-            proportion=0.10,
+-            beam_width_range=(0.70, 0.40),
+-            center_platform_shape="circle",
+-            center_platform_radius=1.25,
+-            outer_ring_inner_radius=3.75,
+-            outer_ring_outer_radius=4.60,
+-            outer_ring_segments=96,
+-            num_bridges=10,
+-            bridge_overlap=0.08,
+-            terrain_height=0.5,
+-            floor_thickness=0.10,
+-            # The center platform, bridges, and outer ring have top surface z=0;
+-            # the surrounding recessed floor is at z=-terrain_height. Restrict
+-            # target patches to the top surface so commands never target the pit.
+-            flat_patch_sampling=_target_flat_patch_cfg(
+-                x_range=(-4.15, 4.15),
+-                y_range=(-4.15, 4.15),
+-                z_range=(-0.05, 0.05),
+-                max_height_diff=0.05,
+-            ),
+-        ),
++        # "balance_beam": MeshRadialBalanceBeamTerrainCfg(
++        #     proportion=0.10,
++        #     beam_width_range=(0.70, 0.40),
++        #     center_platform_shape="circle",
++        #     center_platform_radius=1.25,
++        #     outer_ring_inner_radius=3.75,
++        #     outer_ring_outer_radius=4.60,
++        #     outer_ring_segments=96,
++        #     num_bridges=10,
++        #     bridge_overlap=0.08,
++        #     terrain_height=0.5,
++        #     floor_thickness=0.10,
++        #     # The center platform, bridges, and outer ring have top surface z=0;
++        #     # the surrounding recessed floor is at z=-terrain_height. Restrict
++        #     # target patches to the top surface so commands never target the pit.
++        #     flat_patch_sampling=_target_flat_patch_cfg(
++        #         x_range=(-4.15, 4.15),
++        #         y_range=(-4.15, 4.15),
++        #         z_range=(-0.05, 0.05),
++        #         max_height_diff=0.05,
++        #     ),
++        # ),
+         # "concentric_square_hurdle": MeshConcentricSquareHurdleTerrainCfg(
+         #     proportion=0.10,
+         #     basin_depth=0.0,
+@@ -281,17 +281,17 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
+         # ),
+         "gap": terrain_gen.MeshGapTerrainCfg(
+             proportion=0.15,
+-            gap_width_range=(0.05, 0.6),
++            gap_width_range=(0.05, 0.7),
+             platform_width=2.0,
+             flat_patch_sampling=_target_flat_patch_cfg(x_range=(3.7, 3.7), y_range=(0.0, 0.0)),
+         ),
+         # "wave": terrain_gen.HfWaveTerrainCfg(proportion=0.15, amplitude_range=(0.0, 0.2), num_waves=5.0),
+         "high_platform": terrain_gen.MeshPitTerrainCfg(
+             proportion=0.1,
+-            pit_depth_range=(0.0, 0.4),
++            pit_depth_range=(0.05, 0.4),
+             platform_width=2.0,
+             double_pit=True,
+-            flat_patch_sampling=_target_flat_patch_cfg(x_range=(3.7, 3.7), y_range=(0.0, 0.0)),
++            flat_patch_sampling=_target_flat_patch_cfg(x_range=(4.2, 4.2), y_range=(0.0, 0.0)),
+         ),
+         # "star": terrain_gen.MeshStarTerrainCfg(
+         #     proportion=0.15, num_bars=6, bar_width_range=(0.05, 0.05),

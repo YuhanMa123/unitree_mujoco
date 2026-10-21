@@ -1,8 +1,8 @@
 # G1 29DOF 盲走：C++ MuJoCo + C++ DreamWaQ
 
-当前使用根目录 `policy.onnx` 和 `example/cpp/g1_locomotion.yaml`。
+当前使用 `example/exported/g1_locomotion/policy.onnx` 和 `example/exported/g1_locomotion/g1_locomotion.yaml`。
 策略只读取关节位置、关节速度、IMU、速度命令及历史观测，不需要深度相机。
-`exported/g1_parkour/` 中的深度编码器和动作网络用于另一套跑酷策略。
+`example/exported/g1_parkour/` 中的深度编码器和动作网络用于另一套跑酷策略。
 Xbox 手柄操作及参数见 [G1 Xbox 控制说明](g1_xbox_cpp.md)。
 
 ## 当前配置
@@ -38,7 +38,7 @@ cd /home/mayh/MYH/Project_code/Python/unitree_mujoco
 
 ```bash
 cd /home/mayh/MYH/Project_code/Python/unitree_mujoco
-./example/cpp/build/g1_locomotion 3 lo 1 example/cpp/g1_locomotion.yaml policy.onnx
+./example/cpp/build/g1_locomotion 3 lo 1 example/exported/g1_locomotion/g1_locomotion.yaml example/exported/g1_locomotion/policy.onnx
 ```
 
 位置参数依次为：复位时间（秒）、网卡、DDS domain、部署配置、ONNX 模型。
@@ -97,7 +97,7 @@ cmake -S example/cpp -B example/cpp/build \
   -DONNXRUNTIME_ROOT="$ORT_ROOT" \
   -DONNXRUNTIME_INCLUDE_DIR="$ORT_ROOT/include" \
   -DONNXRUNTIME_LIBRARY="$ORT_ROOT/lib/libonnxruntime.so.1.22.0"
-cmake --build example/cpp/build --target g1_locomotion g1_locomotion_policy_test -j4
+cmake --build example/cpp/build --target g1_locomotion -j4
 cmake --build simulate/build --target unitree_mujoco -j4
 ```
 
@@ -108,7 +108,7 @@ cmake --build simulate/build --target unitree_mujoco -j4
 
 ```bash
 ./example/cpp/build/g1_locomotion --check-policy
-ctest --test-dir example/cpp/build -R '^g1_locomotion_policy$' --output-on-failure
+python3 example/cpp/tests/run_tests.py --test locomotion
 ```
 
 ## 本次检查范围

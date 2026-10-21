@@ -1,14 +1,14 @@
-# Shared by the C++ simulator and g1_locomotion; restart both after editing.
+# Shared by the C++ simulator, g1_locomotion and g1_parkour; restart both after editing.
 enabled: true
 device: "/dev/input/js0"
 deadzone: 0.12
-forward_max: 0.6     # m/s, left stick / D-pad
+forward_max: 1.0     # m/s, left stick / D-pad
 backward_max: 0.4
 lateral_max: 0.4
 yaw_max: 1.0         # rad/s, right stick
 velocity_step: 0.1   # m/s per D-pad press; holding does not repeat
 band_speed: 0.4      # m/s while holding Y (up) or A (down)
 trigger_threshold: 0.5
-heading_hold_seconds: 0.35 # LT: hold to follow robot heading; release to restore view
+heading_hold_seconds: 0.35 # LT: hold to follow robot heading; release to keep view without following
 camera_distance: 2.5
 camera_elevation: -15

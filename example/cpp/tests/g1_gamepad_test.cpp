@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include <vector>
 #include "gamepad_controls.h"
+#include "simulation_reset.h"
 
 namespace pad = unitree_mujoco::gamepad;
 void Check(bool condition, const char* message) {
@@ -26,7 +27,7 @@ void CheckDrive(const pad::Config& config) {
     std::array<float, 3> velocity{};
     auto tick = [&](bool active = true) {
         const auto action = drive.Update(state, velocity, active);
-        if (action.stop || action.reset || action.suspend) velocity.fill(0);
+        if (action.stop || action.reset || action.suspend || action.simulation_reset) velocity.fill(0);
         if (action.planar_update) { velocity[0] = action.velocity[0]; velocity[1] = action.velocity[1]; }
         if (action.yaw_update) velocity[2] = action.velocity[2];
         return action;
@@ -59,6 +60,13 @@ void CheckDrive(const pad::Config& config) {
     state.b = false; state.start = true; Check(tick(false).start, "Menu must request policy entry");
     state.start = false; state.y = true; Check(tick().suspend, "Band movement must suspend walking");
     state.y = false; tick(); tick();
+    state.rb = true;
+    const auto reset_simulation = tick();
+    Check(reset_simulation.simulation_reset && !reset_simulation.reset && !reset_simulation.suspend,
+          "RB must request simulation reset without exiting policy for a joint reset");
+    Check(!tick().simulation_reset, "Held RB must not repeatedly reset simulation");
+    Near(velocity[0], 0);
+    state.rb = false; tick(); tick();
     state.up = true; tick(); Check(velocity[0] > 0, "D-pad must work after neutral rearm");
     state.connected = false; Check(tick().stop, "Disconnect must stop velocity"); Near(velocity[0], 0);
     state.connected = true; state.b = true;
@@ -106,25 +114,49 @@ void CheckSimulator(const pad::Config& config) {
     for (int i=0; i<20; ++i) tick();
     Near(band.length_, initial);
     state.a = false; state.x = true; tick(); Check(!band.enable_, "X must release the band");
-    state.x = false; state.rb = true; tick(); Check(band.enable_, "RB must reattach the band");
+    state.x = false; state.b = true; tick(); Check(band.enable_, "B must reattach the band");
     Near(band.point_[0], 1); Near(band.point_[1], 2); Near(band.point_[2], 3);
-    state.rb = false; state.lb = true; tick();
+    state.b = false; state.lb = true; tick();
     Near(camera.lookat[0], 1); Near(camera.lookat[1], 2); Near(camera.lookat[2], 1);
     Near(camera.azimuth, 90); Near(camera.distance, config.camera_distance);
-    tick(); Near(camera.azimuth, 90); // Holding LB must not toggle the lock repeatedly.
-    state.lb = false; data->qpos[0] = 5; mj_forward(model, data); tick(); Near(camera.lookat[0], 5);
+    // LB toggles position follow; holding it must not toggle again or lock orbit.
+    camera.azimuth = 37; camera.elevation = -25; camera.distance = 4;
+    tick(); Near(camera.azimuth, 37); Near(camera.elevation, -25); Near(camera.distance, 4);
+    data->qpos[0] = 5;
     data->qpos[3] = std::cos(3.14159265358979323846/8);
     data->qpos[6] = std::sin(3.14159265358979323846/8);
-    mj_forward(model, data); tick(); Near(camera.azimuth, 45); // Follow a turn after LB has been released.
-    state.lt = 1; tick(); for (int i=0; i<20; ++i) tick();
-    state.lt = 0; tick(); Near(camera.azimuth, 45); // Releasing LT must preserve an LB lock.
-    state.lb = true; tick(); Near(camera.azimuth, 37); Near(camera.distance, 4);
+    mj_forward(model, data); tick();
+    Near(camera.lookat[0], 5); Near(camera.azimuth, 37);
+    state.lb = false; tick(); Near(camera.azimuth, 37);
+    state.lb = true; tick(); // Second press disables centering without changing orbit.
+    Near(camera.lookat[0], 5); Near(camera.azimuth, 37); Near(camera.distance, 4);
+    data->qpos[0] = 6; mj_forward(model, data);
+    tick(); Near(camera.lookat[0], 5); // Held LB does not turn follow back on.
     state.lb = false; tick();
-    data->qpos[3] = data->qpos[6] = std::sqrt(0.5); mj_forward(model, data);
-    state.lt = 1; tick();
-    Near(camera.azimuth, 37); // trigger must be held long enough
+    state.lb = true; tick(); // Third press enables and aligns once again.
+    Near(camera.lookat[0], 6); Near(camera.azimuth, 45);
+    state.lb = false; state.lt = 1; tick();
     for (int i=0; i<20; ++i) tick();
-    Near(camera.azimuth, 90); Near(camera.distance, config.camera_distance);
+    Near(camera.azimuth, 45);
+    state.lt = 0; tick();
+    camera.azimuth = 37; camera.elevation = -25; camera.distance = 4;
+    data->qpos[0] = 5;
+    data->qpos[3] = data->qpos[6] = std::sqrt(0.5); mj_forward(model, data);
+    tick(); Near(camera.lookat[0], 5); Near(camera.azimuth, 37);
+    Near(camera.elevation, -25); Near(camera.distance, 4); // LB remains enabled after LT release.
+    state.lb = true; tick(); // Disable centering for the independent LT checks below.
+    state.lb = false; tick();
+    data->qpos[3] = std::cos(3.14159265358979323846/8);
+    data->qpos[6] = std::sin(3.14159265358979323846/8); mj_forward(model, data);
+    camera.azimuth = 37; camera.elevation = -25; camera.distance = 4;
+    state.lt = 1; tick();
+    Near(camera.azimuth, 37); // LT must be held long enough.
+    for (int i=0; i<20; ++i) tick();
+    Near(camera.azimuth, 45); Near(camera.distance, config.camera_distance);
+    // Only held LT continuously follows translation and turns.
+    data->qpos[0] = 6;
+    data->qpos[3] = data->qpos[6] = std::sqrt(0.5); mj_forward(model, data);
+    tick(); Near(camera.lookat[0], 6); Near(camera.azimuth, 90);
     mjvScene scene; mjv_defaultScene(&scene); mjv_makeScene(model, &scene, 100);
     mjvOption option; mjv_defaultOption(&option);
     mjv_updateScene(model, data, &option, nullptr, &camera, mjCAT_ALL, &scene);
@@ -132,14 +164,45 @@ void CheckSimulator(const pad::Config& config) {
         throw std::runtime_error("Heading camera direction: " + std::to_string(scene.camera[0].forward[0]) +
                                  ", " + std::to_string(scene.camera[0].forward[1]) + ", " + std::to_string(scene.camera[0].forward[2]));
     mjv_freeScene(&scene);
-    state.lt = 0; tick(); Near(camera.azimuth, 37); Near(camera.distance, 4);
+    state.lt = 0; tick(); Near(camera.azimuth, 90);
+    Near(camera.elevation, config.camera_elevation); Near(camera.distance, config.camera_distance);
+    data->qpos[0] = 5;
+    data->qpos[3] = std::cos(3.14159265358979323846/8);
+    data->qpos[6] = std::sin(3.14159265358979323846/8);
+    mj_forward(model, data); tick();
+    Near(camera.lookat[0], 6); Near(camera.azimuth, 90); // No follow after release.
+    camera.azimuth = 37; camera.elevation = -25; camera.distance = 4;
+    camera.lookat[0] = 8;
+    tick(); Near(camera.azimuth, 37); Near(camera.elevation, -25);
+    Near(camera.distance, 4); Near(camera.lookat[0], 8); // Mouse edits remain free.
     state.x = true; tick(); Check(!band.enable_, "Release before reset test");
     state.x = false; state.b = true; tick();
     Check(band.enable_, "B reset must reattach the support band");
     Near(band.point_[0], 5); Near(band.point_[1], 2);
     state.b = false;
     state.lt = 1; tick(); for (int i=0; i<20; ++i) tick();
-    state.connected = false; tick(); Near(camera.azimuth, 37);
+    Near(camera.azimuth, 45); Near(camera.lookat[0], 5); // A new hold resumes follow.
+    state.connected = false; tick(); Near(camera.azimuth, 45);
+    data->qpos[0] = 7; mj_forward(model, data); tick(); Near(camera.lookat[0], 5);
+    // Reconnect with RB held must not reset until it is released and pressed again.
+    state.connected = true; state.rb = true;
+    auto update = [&]() {
+        now += 0.02;
+        return ui.Update(state, model, data, camera, band, true, now);
+    };
+    Check(!update() && !update(), "Held RB on reconnect must not reset");
+    state.rb = false; state.lt = 0; update();
+    const auto generation = unitree_mujoco::simulation_reset_generation;
+    data->time = 12; data->qvel[0] = 3; data->xfrc_applied[0] = 10;
+    state.rb = true;
+    Check(update(), "RB press must request full simulation reset");
+    unitree_mujoco::ResetSimulation(model, data);
+    Near(data->time, 0); Near(data->qpos[0], model->qpos0[0]);
+    Near(data->qvel[0], 0); Near(data->xfrc_applied[0], 0);
+    Check(unitree_mujoco::simulation_reset_generation == generation+1, "Reset generation must advance");
+    data->time = 1;
+    Check(!update(), "Holding RB must not repeatedly reset");
+    Near(data->time, 1);
     mj_deleteData(data); mj_deleteModel(model);
 }
 

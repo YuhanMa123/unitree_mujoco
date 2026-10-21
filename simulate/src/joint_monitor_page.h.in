@@ -1,0 +1,3 @@
+#pragma once
+// Embed the shared Python/C++ page; no source-tree files needed at runtime.
+inline constexpr char kJointMonitorPage[] = R"MONITOR_HTML(@JOINT_MONITOR_HTML@)MONITOR_HTML";

@@ -61,17 +61,15 @@ def SimulationThread():
         step_start = time.perf_counter()
 
         with locker:
-            if config.ENABLE_ELASTIC_BAND:
-                if elastic_band.enable:
-                    mj_data.xfrc_applied[band_attached_link, :3] = elastic_band.Advance(
-                        mj_data.qpos[:3], mj_data.qvel[:3]
-                    )
-                else:
-                    mj_data.xfrc_applied[band_attached_link, :3] = 0
+            motor_active = unitree.UpdateMotorControl()
             if parkour_observations is not None:
-                mujoco.mj_forward(mj_model, mj_data)
+                parkour_observations.adapter.set_motor_control_active(motor_active)
+            # Refresh kinematics and COM velocities for the actual attachment point.
+            mujoco.mj_forward(mj_model, mj_data)
+            if config.ENABLE_ELASTIC_BAND:
+                elastic_band.Apply(mj_model, mj_data, band_attached_link)
+            if parkour_observations is not None:
                 parkour_observations.update()
-            unitree.UpdateMotorControl()
             if parkour_observations is not None:
                 # Apply the tighter of training and model torque limits, in motor order.
                 adapter = parkour_observations.adapter

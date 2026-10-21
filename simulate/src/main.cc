@@ -18,6 +18,7 @@
 #undef private
 
 #include <chrono>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -35,6 +36,7 @@
 #include "unitree_sdk2_bridge.h"
 #include "param.h"
 #include "gamepad_controls.h"
+#include "parkour_observation.h"
 
 #define MUJOCO_PLUGIN_DIR "mujoco_plugin"
 
@@ -51,38 +53,7 @@ extern "C"
 #endif
 }
 
-class ElasticBand
-{
-public:
-  ElasticBand(){};
-  void Advance(std::vector<double> x, std::vector<double> dx)
-  {
-    std::vector<double> delta_x = {0.0, 0.0, 0.0};
-    delta_x[0] = point_[0] - x[0];
-    delta_x[1] = point_[1] - x[1];
-    delta_x[2] = point_[2] - x[2];
-    double distance = sqrt(delta_x[0] * delta_x[0] + delta_x[1] * delta_x[1] + delta_x[2] * delta_x[2]);
-
-    std::vector<double> direction = {0.0, 0.0, 0.0};
-    direction[0] = delta_x[0] / distance;
-    direction[1] = delta_x[1] / distance;
-    direction[2] = delta_x[2] / distance;
-
-    double v = dx[0] * direction[0] + dx[1] * direction[1] + dx[2] * direction[2];
-
-    f_[0] = (stiffness_ * (distance - length_) - damping_ * v) * direction[0];
-    f_[1] = (stiffness_ * (distance - length_) - damping_ * v) * direction[1];
-    f_[2] = (stiffness_ * (distance - length_) - damping_ * v) * direction[2];
-  }
-
-
-  double stiffness_ = 200;
-  double damping_ = 100;
-  std::vector<double> point_ = {0, 0, 3};
-  double length_ = 0.0;
-  bool enable_ = true;
-  std::vector<double> f_ = {0, 0, 0};
-};
+#include "elastic_band.h"
 inline ElasticBand elastic_band;
 
 
@@ -98,9 +69,15 @@ namespace
 
   // model and data
   mjModel *m = nullptr;
+  std::atomic<bool> keyboard_reset_requested{false};
+  std::atomic<int> keyboard_band_toggles{0}, keyboard_band_length_steps{0};
   mjData *d = nullptr;
   std::unique_ptr<unitree_mujoco::gamepad::Reader> gamepad_reader;
   std::unique_ptr<unitree_mujoco::SimulatorGamepad> gamepad_controls;
+  std::unique_ptr<unitree_mujoco::ParkourObservationPublisher> parkour_observations;
+  std::atomic<UnitreeSDK2BridgeBase*> sdk_bridge{nullptr};
+  mjModel* parkour_model = nullptr;
+  mjData* parkour_data = nullptr;
 
   // control noise variables
   mjtNum *ctrlnoise = nullptr;
@@ -327,6 +304,34 @@ namespace
   }
 
   // simulate in background thread (while rendering in main thread)
+  void PreparePhysicsStep()
+  {
+    if (param::config.parkour &&
+        (!parkour_observations || parkour_model != m || parkour_data != d)) {
+      if (param::config.robot != "g1") throw std::runtime_error("Parkour requires robot g1");
+      const auto visual_cfg=YAML::LoadFile(param::config.parkour_config);
+      const double visual_dt=visual_cfg["physics_dt"].as<double>();
+      if(!std::isfinite(visual_dt) || visual_dt<=0 || visual_dt>.02)
+        throw std::runtime_error("Visual physics_dt must be in (0, 0.02]");
+      m->opt.timestep=visual_dt;
+      parkour_observations = std::make_unique<unitree_mujoco::ParkourObservationPublisher>(
+          m, d, param::config.parkour_config, param::config.parkour_port);
+      parkour_model = m;
+      parkour_data = d;
+      std::cout << "C++ parkour observations -> 127.0.0.1:" << param::config.parkour_port
+                << "; config: " << param::config.parkour_config << '\n';
+    }
+    auto* bridge = sdk_bridge.load();
+    const bool motor_active = bridge && bridge->ApplyMotorControl();
+    if (param::config.parkour) parkour_observations->SetMotorControlActive(motor_active);
+    mj_forward(m, d);
+    if (param::config.enable_elastic_band == 1) elastic_band.Apply(m, d);
+    if (param::config.parkour) {
+      parkour_observations->Update();
+      parkour_observations->LimitTorque();
+    }
+  }
+
   void PhysicsLoop(mj::Simulate &sim)
   {
     bool gamepad_connected = false;
@@ -420,6 +425,21 @@ namespace
         // run only if model is present
         if (m)
         {
+          // UI callbacks enqueue changes; only the physics thread mutates the band.
+          if (param::config.enable_elastic_band == 1) {
+            if (keyboard_band_toggles.exchange(0) % 2) {
+              if (!elastic_band.enable_) {
+                mj_forward(m, d);
+                const auto* attachment = d->xipos + 3*ElasticBandBody(m);
+                elastic_band.point_ = {attachment[0], attachment[1], attachment[2]+2.0};
+                const double weight = mj_getTotalmass(m)*mju_norm3(m->opt.gravity);
+                elastic_band.length_ = std::max(0.0, 2.0-weight/elastic_band.stiffness_);
+              }
+              elastic_band.enable_ = !elastic_band.enable_;
+            }
+            elastic_band.length_ += 0.1*keyboard_band_length_steps.exchange(0);
+          }
+          bool simulation_reset_requested = keyboard_reset_requested.exchange(false);
           if (gamepad_reader)
           {
             const auto input = gamepad_reader->Poll();
@@ -435,8 +455,21 @@ namespace
             }
             const double now = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-            gamepad_controls->Update(input, m, d, sim.cam, elastic_band,
-                                     param::config.enable_elastic_band == 1, now);
+            simulation_reset_requested |= gamepad_controls->Update(input, m, d, sim.cam, elastic_band,
+                                        param::config.enable_elastic_band == 1, now);
+          }
+          if (simulation_reset_requested) {
+            unitree_mujoco::ResetSimulation(m, d);
+            if (parkour_observations) parkour_observations->ResetPose();
+            if (param::config.enable_elastic_band == 1) {
+              const auto* attachment = d->xipos + 3*ElasticBandBody(m);
+              elastic_band.point_[0] = attachment[0];
+              elastic_band.point_[1] = attachment[1];
+            }
+            elastic_band.f_ = {0, 0, 0};
+            sim.scrub_index = 0;
+            sim.AddToHistory();
+            std::cout << "Simulation reset; controller mode and band state preserved.\n";
           }
           // running
           if (sim.run)
@@ -484,6 +517,7 @@ namespace
               sim.speed_changed = false;
 
               // run single step, let next iteration deal with timing
+              PreparePhysicsStep();
               mj_step(m, d);
               stepped = true;
             }
@@ -508,30 +542,8 @@ namespace
                   measured = true;
                 }
 
-                // elastic band on base link
-                if (param::config.enable_elastic_band == 1)
-                {
-                  if (elastic_band.enable_)
-                  {
-                    std::vector<double> x = {d->qpos[0], d->qpos[1], d->qpos[2]};
-                    std::vector<double> dx = {d->qvel[0], d->qvel[1], d->qvel[2]};
-
-                    elastic_band.Advance(x, dx);
-
-                    d->xfrc_applied[param::config.band_attached_link] = elastic_band.f_[0];
-                    d->xfrc_applied[param::config.band_attached_link + 1] = elastic_band.f_[1];
-                    d->xfrc_applied[param::config.band_attached_link + 2] = elastic_band.f_[2];
-                  }
-                  else
-                  {
-                    // Release the last spring force when the band is disabled.
-                    d->xfrc_applied[param::config.band_attached_link] = 0;
-                    d->xfrc_applied[param::config.band_attached_link + 1] = 0;
-                    d->xfrc_applied[param::config.band_attached_link + 2] = 0;
-                  }
-                }
-
                 // call mj_step
+                PreparePhysicsStep();
                 mj_step(m, d);
                 stepped = true;
 
@@ -590,7 +602,12 @@ void PhysicsThread(mj::Simulate *sim, const char *filename)
     }
   }
 
-  PhysicsLoop(*sim);
+  try {
+    PhysicsLoop(*sim);
+  } catch (const std::exception& error) {
+    std::cerr << "Simulation error: " << error.what() << '\n';
+    std::exit(EXIT_FAILURE);
+  }
 
   // delete everything we allocated
   free(ctrlnoise);
@@ -602,6 +619,7 @@ void PhysicsThread(mj::Simulate *sim, const char *filename)
 
 void *UnitreeSdk2BridgeThread(void *arg)
 {
+  auto* sim = static_cast<mj::Simulate*>(arg);
   // Wait for mujoco data
   while (true)
   {
@@ -616,12 +634,6 @@ void *UnitreeSdk2BridgeThread(void *arg)
   unitree::robot::ChannelFactory::Instance()->Init(param::config.domain_id, param::config.interface);
 
 
-  int body_id = mj_name2id(m, mjOBJ_BODY, "torso_link");
-  if (body_id < 0) {
-    body_id = mj_name2id(m, mjOBJ_BODY, "base_link");
-  }
-  param::config.band_attached_link = 6 * body_id;
-
   std::unique_ptr<UnitreeSDK2BridgeBase> interface = nullptr;
   int idl_type = param::IDL_AUTO;
   try {
@@ -633,11 +645,12 @@ void *UnitreeSdk2BridgeThread(void *arg)
 
   if (idl_type == param::IDL_HG) {
     std::cout << "Using unitree_hg DDS IDL for robot " << param::config.robot << std::endl;
-    interface = std::make_unique<G1Bridge>(m, d);
+    interface = std::make_unique<G1Bridge>(m, d, &sim->mtx);
   } else {
     std::cout << "Using unitree_go DDS IDL for robot " << param::config.robot << std::endl;
-    interface = std::make_unique<Go2Bridge>(m, d);
+    interface = std::make_unique<Go2Bridge>(m, d, &sim->mtx);
   }
+  sdk_bridge = interface.get();
   interface->start();
   
   while (true)
@@ -663,16 +676,16 @@ void user_key_cb(GLFWwindow* window, int key, int scancode, int act, int mods) {
   {
     if(param::config.enable_elastic_band == 1) {
       if (key==GLFW_KEY_9) {
-        elastic_band.enable_ = !elastic_band.enable_;
+        ++keyboard_band_toggles;
       } else if (key==GLFW_KEY_7 || key==GLFW_KEY_UP) {
-        elastic_band.length_ -= 0.1;
+        --keyboard_band_length_steps;
       } else if (key==GLFW_KEY_8 || key==GLFW_KEY_DOWN) {
-        elastic_band.length_ += 0.1;
+        ++keyboard_band_length_steps;
       }
     }
     if(key==GLFW_KEY_BACKSPACE) {
-      mj_resetData(m, d);
-      mj_forward(m, d);
+      // Apply on the physics thread under the simulation mutex.
+      keyboard_reset_requested = true;
     }
   }
 }
@@ -713,12 +726,14 @@ int main(int argc, char **argv)
   std::filesystem::path proj_dir = std::filesystem::path(getExecutableDir()).parent_path();
   param::config.load_from_yaml(proj_dir / "config.yaml");
   param::helper(argc, argv);
+  if (param::config.parkour_config.empty())
+    param::config.parkour_config = (proj_dir.parent_path() / "example/exported/g1_parkour/g1_torsobase_cfg.json").string();
   try {
     const auto gamepad = unitree_mujoco::gamepad::Config::Load((proj_dir / "gamepad.yaml").string());
     if (gamepad.enabled) {
       gamepad_reader = std::make_unique<unitree_mujoco::gamepad::Reader>(gamepad);
       gamepad_controls = std::make_unique<unitree_mujoco::SimulatorGamepad>(gamepad);
-      std::cout << "Xbox simulator controls enabled: Y/A lift/lower, X release band, RB reattach, LB lock base/heading view, hold LT temporary heading view.\n";
+      std::cout << "Xbox simulator controls enabled: Y/A lift/lower, X release band, RB reset simulation, LB toggle centering with free mouse orbit, hold LT temporary heading follow.\n";
     }
   } catch (const std::exception& error) {
     std::cerr << "Gamepad configuration: " << error.what() << '\n';
@@ -733,7 +748,7 @@ int main(int argc, char **argv)
     std::make_unique<mj::GlfwAdapter>(),
     &cam, &opt, &pert, /* is_passive = */ false);
 
-  std::thread unitree_thread(UnitreeSdk2BridgeThread, nullptr);
+  std::thread unitree_thread(UnitreeSdk2BridgeThread, sim.get());
 
   // start physics thread
   std::thread physicsthreadhandle(&PhysicsThread, sim.get(), param::config.robot_scene.c_str());

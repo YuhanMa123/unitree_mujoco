@@ -1,0 +1,166 @@
+seed: 42
+device: cuda:0
+num_steps_per_env: 24
+max_iterations: 25001
+empirical_normalization: false
+obs_groups: {}
+clip_actions: 100.0
+save_interval: 200
+experiment_name: unitree_g1_walk_amp_vae_depth_target
+run_name: unitree_g1_amp_walkTerrains_target_depth32*32+0.0scanner_newVAE_flat+stair+slope+gap+hurdle+beam(target_range)_newfeetUrdf_crossattention_vel-con-sti=0.25_depthnoise_0.7target
+logger: tensorboard
+neptune_project: isaaclab
+wandb_project: isaaclab
+resume: false
+load_run: .*
+load_checkpoint: model_.*.pt
+class_name: VAEAMPOnPolicyRunner
+policy:
+  class_name: ActorCriticVAEDepthCrossAttention
+  init_noise_std: 1.0
+  noise_std_type: scalar
+  state_dependent_std: false
+  actor_obs_normalization: {}
+  critic_obs_normalization: {}
+  actor_hidden_dims:
+  - 512
+  - 256
+  - 128
+  critic_hidden_dims:
+  - 512
+  - 256
+  - 128
+  activation: elu
+  encoder_hidden_dims:
+  - 128
+  - 64
+  decoder_hidden_dims:
+  - 64
+  - 128
+  encoder_out_dim: 23
+  depth_shape: !!python/tuple
+  - 8
+  - 32
+  - 32
+  depth_latent_dim: 128
+  depth_observation_group: depth_image
+  critic_uses_depth: false
+  use_depth_distillation: false
+  heightmap_observation_group: ''
+  heightmap_dim: 187
+  heightmap_latent_dim: 32
+  heightmap_autoencoder_loss_coef: 1.0
+  depth_distillation_loss_coef: 0.1
+  cross_attention_num_heads: 4
+  cross_attention_depth_base_channels: 32
+  cross_attention_proprio_hidden_dims:
+  - 128
+  cross_attention_use_pos_embed: true
+  cross_attention_query_state_dim: 7
+algorithm:
+  class_name: AMP_VAE_PPO
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  learning_rate: 0.0003
+  schedule: adaptive
+  gamma: 0.99
+  lam: 0.95
+  entropy_coef: 0.01
+  desired_kl: 0.01
+  max_grad_norm: 1.0
+  value_loss_coef: 1.0
+  use_clipped_value_loss: true
+  clip_param: 0.2
+  normalize_advantage_per_mini_batch: true
+  rnd_cfg: null
+  symmetry_cfg: null
+  vae_beta: 1.0
+  vae_loss_coef: 1.0
+  critic_frame_dim: null
+  critic_history_length: null
+  vel_start_idx: 0
+  state_estimation_start_idx: null
+  state_estimation_target_dim: 7
+  use_prev_critic_for_velocity: false
+num_obs_hist: 5
+runner_class_name: VAEAMPOnPolicyRunner
+amp_reward_coef: 0.3
+amp_motion_files:
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/slpoe_74_14_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/slpoe_74_14_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/slpoe_74_15_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/slpoe_74_15_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/slpoe_74_16_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/slpoe_74_16_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/slpoe_74_17_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/slpoe_74_17_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/slpoe_74_18_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/slpoe_74_18_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/slpoe_74_19_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/slpoe_74_19_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUpAndDown_113_19_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUpAndDown_113_19_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUpAndDown_113_20_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUpAndDown_113_20_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUpAndDown_114_07_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUpAndDown_114_07_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUpAndDown_114_08_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUpAndDown_114_08_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUpAndDown_114_09_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUpAndDown_114_09_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_27_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_27_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_28_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_28_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_29_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_29_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_30_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_30_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_31_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_31_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_32_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_32_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_34_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_34_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_35_stageii_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/terrain/stairsUp_83_35_stageii_mirror_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/walk_new/walk1_subject1.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/walk_new/walk1_subject1_mirror.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/walk_new/walk_amp.txt
+- /home/mayh/MYH/Project_code/Python/robot_lab/source/robot_lab/robot_lab/datasets/unitree_g1/motion_amp_expert/gmr/walk_new/walk_amp_mirror.txt
+amp_num_preload_transitions: 200000
+amp_sequence_window_size: 2
+amp_task_reward_lerp: 0.7
+amp_discr_hidden_dims:
+- 256
+- 128
+min_normalized_std:
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05

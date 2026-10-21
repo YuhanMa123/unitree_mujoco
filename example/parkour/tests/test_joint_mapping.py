@@ -15,7 +15,7 @@ from mujoco_adapter import MujocoAdapter
 
 class JointMappingTest(unittest.TestCase):
     def setUp(self):
-        cfg = json.loads((PARKOUR / 'g1.json').read_text())
+        cfg = json.loads((ROOT / 'example/exported/g1_parkour/g1_torsobase_cfg.json').read_text())
         self.params = SimpleNamespace(config=cfg, joint_names=cfg['joint_names'],
             default=np.array(cfg['default_joint_pos']), effort=np.array(cfg['effort_limit']),
             kp=np.array(cfg['kp']), kd=np.array(cfg['kd']))
@@ -57,6 +57,33 @@ class JointMappingTest(unittest.TestCase):
             sign = -1 if name.startswith('waist_') else 1
             self.assertAlmostEqual(velocity[i], sign * .1)
             self.assertEqual(np.sign(self.data.ctrl[a.actuators[i]]), sign)
+
+    def test_depth_body_and_yaw_alignment(self):
+        for alignment in ('body', 'yaw'):
+            model = mujoco.MjModel.from_xml_path(str(ROOT / 'unitree_robots/g1/scene_29dof_flat.xml'))
+            model.geom_group[model.geom_bodyid > 0] = 1
+            data = mujoco.MjData(model)
+            self.params.config['camera'] = {'ray_alignment': alignment}
+            adapter = MujocoAdapter(model, data, self.params, configure_dynamics=False)
+            ratios = []
+            for angle in (0., .2):
+                mujoco.mj_resetData(model, data)
+                data.qpos[2] = 1.2
+                data.qpos[3:7] = [np.cos(angle/2), 0., np.sin(angle/2), 0.]
+                mujoco.mj_forward(model, data)
+                measured = adapter.depth()[18, 32]
+                rotation = data.xmat[adapter.torso].reshape(3, 3)
+                origin = data.xpos[adapter.torso] + rotation @ adapter.offset
+                direction = adapter.rays[18*64+32]
+                if alignment == 'body':
+                    direction = rotation @ direction
+                expected = -origin[2] / direction[2] * adapter.cosines[18*64+32]
+                self.assertAlmostEqual(measured, expected, places=5)
+                ratios.append(measured / origin[2])
+            if alignment == 'yaw':
+                self.assertAlmostEqual(*ratios, places=5)
+            else:
+                self.assertGreater(abs(ratios[1]-ratios[0]), .1)
 
 
 if __name__ == '__main__':

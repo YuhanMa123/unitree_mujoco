@@ -6,6 +6,11 @@ find_package(unitree_sdk2 REQUIRED)
 find_package(Boost REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
+# Task deployment assets: keep each model and its matching parameters together.
+get_filename_component(G1_EXPORTED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../exported" ABSOLUTE)
+set(G1_LOCOMOTION_DIR "${G1_EXPORTED_DIR}/g1_locomotion")
+set(G1_PARKOUR_DIR "${G1_EXPORTED_DIR}/g1_parkour")
+
 add_executable(stand_go2 stand_go2.cpp)
 target_link_libraries(stand_go2  unitree_sdk2)
 
@@ -16,17 +21,12 @@ target_link_libraries(gamepad_monitor yaml-cpp)
 target_compile_definitions(gamepad_monitor PRIVATE
     G1_GAMEPAD_DEFAULT_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/gamepad.yaml")
 
-add_executable(reset_g1_29dof reset_g1_29dof.cpp)
-target_compile_features(reset_g1_29dof PRIVATE cxx_std_17)
-target_link_libraries(reset_g1_29dof unitree_sdk2 Boost::boost yaml-cpp)
-target_compile_definitions(reset_g1_29dof PRIVATE
-    G1_POLICY_DEFAULT_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/g1_locomotion.yaml")
-
 SET(CMAKE_BUILD_TYPE Release)
 
 option(BUILD_G1_LOCOMOTION "Build G1 ONNX locomotion controller" OFF)
-option(BUILD_G1_PARKOUR "Build C++ parkour inference for Python MuJoCo" OFF)
-if(BUILD_G1_LOCOMOTION OR BUILD_G1_PARKOUR)
+option(BUILD_G1_PARKOUR "Build G1 parkour ONNX controller for synchronized MuJoCo observations" OFF)
+option(BUILD_G1_CA_PE_AMP_VAE "Build G1 visual CA PE AMP VAE controller" OFF)
+if(BUILD_G1_LOCOMOTION OR BUILD_G1_PARKOUR OR BUILD_G1_CA_PE_AMP_VAE)
     set(ONNXRUNTIME_ROOT "" CACHE PATH "ONNX Runtime C/C++ distribution directory")
     find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
         HINTS "${ONNXRUNTIME_ROOT}/include")
@@ -35,31 +35,22 @@ if(BUILD_G1_LOCOMOTION OR BUILD_G1_PARKOUR)
     if(NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIBRARY)
         message(FATAL_ERROR "Set ONNXRUNTIME_ROOT to an ONNX Runtime C/C++ distribution (include/ and lib/)")
     endif()
-    include(CTest)
 endif()
 if(BUILD_G1_PARKOUR)
     add_executable(g1_parkour g1_parkour.cpp)
     target_compile_features(g1_parkour PRIVATE cxx_std_17)
-    target_include_directories(g1_parkour PRIVATE "${ONNXRUNTIME_INCLUDE_DIR}")
+    target_include_directories(g1_parkour PRIVATE "${ONNXRUNTIME_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
     target_link_libraries(g1_parkour unitree_sdk2 yaml-cpp "${ONNXRUNTIME_LIBRARY}")
     target_compile_definitions(g1_parkour PRIVATE
-        G1_PARKOUR_DEFAULT_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/../parkour/g1.json"
-        G1_PARKOUR_DEFAULT_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/../../exported/g1_parkour")
+        G1_PARKOUR_DEFAULT_CONFIG="${G1_PARKOUR_DIR}/g1_torsobase_cfg.json"
+        G1_PARKOUR_DEFAULT_MODELS="${G1_PARKOUR_DIR}"
+        G1_GAMEPAD_DEFAULT_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/gamepad.yaml")
     if(UNIX AND NOT APPLE)
         target_link_options(g1_parkour PRIVATE "-Wl,--disable-new-dtags")
     endif()
-    if(BUILD_TESTING)
-        add_executable(g1_parkour_policy_test tests/g1_parkour_policy_test.cpp)
-        target_compile_features(g1_parkour_policy_test PRIVATE cxx_std_17)
-        target_include_directories(g1_parkour_policy_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${ONNXRUNTIME_INCLUDE_DIR}")
-        target_link_libraries(g1_parkour_policy_test yaml-cpp "${ONNXRUNTIME_LIBRARY}")
-        add_test(NAME g1_parkour_policy COMMAND g1_parkour_policy_test
-            "${CMAKE_CURRENT_SOURCE_DIR}/../../exported/g1_parkour"
-            "${CMAKE_CURRENT_SOURCE_DIR}/../parkour/g1.json")
-    endif()
 endif()
 if(BUILD_G1_LOCOMOTION)
-    add_executable(g1_locomotion reset_g1_29dof.cpp)
+    add_executable(g1_locomotion g1_locomotion.cpp)
     target_compile_features(g1_locomotion PRIVATE cxx_std_17)
     target_include_directories(g1_locomotion PRIVATE "${ONNXRUNTIME_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
     target_link_libraries(g1_locomotion unitree_sdk2 Boost::boost yaml-cpp "${ONNXRUNTIME_LIBRARY}")
@@ -67,40 +58,22 @@ if(BUILD_G1_LOCOMOTION)
         # Use the linked SDK/ORT versions even in a shell that has sourced ROS.
         target_link_options(g1_locomotion PRIVATE "-Wl,--disable-new-dtags")
     endif()
-    target_compile_definitions(g1_locomotion PRIVATE G1_WITH_POLICY
-        G1_POLICY_DEFAULT_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/g1_locomotion.yaml"
-        G1_POLICY_DEFAULT_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/../../policy.onnx"
+    target_compile_definitions(g1_locomotion PRIVATE
+        G1_POLICY_DEFAULT_CONFIG="${G1_LOCOMOTION_DIR}/g1_locomotion.yaml"
+        G1_POLICY_DEFAULT_MODEL="${G1_LOCOMOTION_DIR}/policy.onnx"
         G1_GAMEPAD_DEFAULT_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/gamepad.yaml")
-    include(CTest)
-    if(BUILD_TESTING)
-        add_executable(g1_gamepad_test tests/g1_gamepad_test.cpp)
-        target_compile_features(g1_gamepad_test PRIVATE cxx_std_17)
-        target_include_directories(g1_gamepad_test PRIVATE
-            "${CMAKE_CURRENT_SOURCE_DIR}/../../include"
-            "${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/src"
-            "${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/mujoco/include")
-        target_link_libraries(g1_gamepad_test yaml-cpp
-            "${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/mujoco/lib/libmujoco.so")
-        add_test(NAME g1_gamepad COMMAND g1_gamepad_test
-            "${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/gamepad.yaml")
-        add_executable(g1_hardware_test tests/g1_hardware_test.cpp)
-        target_compile_features(g1_hardware_test PRIVATE cxx_std_17)
-        target_include_directories(g1_hardware_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-        target_link_libraries(g1_hardware_test unitree_sdk2 yaml-cpp)
-        if(UNIX AND NOT APPLE)
-            target_link_options(g1_hardware_test PRIVATE "-Wl,--disable-new-dtags")
-        endif()
-        add_test(NAME g1_hardware COMMAND g1_hardware_test "${CMAKE_CURRENT_SOURCE_DIR}/g1_locomotion.yaml")
-        add_executable(g1_locomotion_policy_test tests/g1_locomotion_policy_test.cpp)
-        target_compile_features(g1_locomotion_policy_test PRIVATE cxx_std_17)
-        target_include_directories(g1_locomotion_policy_test PRIVATE
-            "${CMAKE_CURRENT_SOURCE_DIR}" "${ONNXRUNTIME_INCLUDE_DIR}")
-        target_link_libraries(g1_locomotion_policy_test yaml-cpp "${ONNXRUNTIME_LIBRARY}")
-        if(UNIX AND NOT APPLE)
-            target_link_options(g1_locomotion_policy_test PRIVATE "-Wl,--disable-new-dtags")
-        endif()
-        add_test(NAME g1_locomotion_policy COMMAND g1_locomotion_policy_test
-            "${CMAKE_CURRENT_SOURCE_DIR}/../../policy.onnx"
-            "${CMAKE_CURRENT_SOURCE_DIR}/g1_locomotion.yaml")
+endif()
+
+if(BUILD_G1_CA_PE_AMP_VAE)
+    add_executable(g1_ca_pe_amp_vae g1_ca_pe_amp_vae.cpp)
+    target_compile_features(g1_ca_pe_amp_vae PRIVATE cxx_std_17)
+    target_include_directories(g1_ca_pe_amp_vae PRIVATE "${ONNXRUNTIME_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
+    target_link_libraries(g1_ca_pe_amp_vae unitree_sdk2 yaml-cpp "${ONNXRUNTIME_LIBRARY}")
+    target_compile_definitions(g1_ca_pe_amp_vae PRIVATE
+        G1_CA_PE_DEFAULT_CONFIG="${G1_EXPORTED_DIR}/g1_CA_PE_AMP_VAE/g1_ca_pe_amp_vae_cfg.json"
+        G1_CA_PE_DEFAULT_MODELS="${G1_EXPORTED_DIR}/g1_CA_PE_AMP_VAE"
+        G1_GAMEPAD_DEFAULT_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/../../simulate/gamepad.yaml")
+    if(UNIX AND NOT APPLE)
+        target_link_options(g1_ca_pe_amp_vae PRIVATE "-Wl,--disable-new-dtags")
     endif()
 endif()

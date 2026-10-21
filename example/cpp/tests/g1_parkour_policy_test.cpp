@@ -35,6 +35,23 @@ int main(int argc,char** argv) {
         Check(decoded.sequence==0,"Packet decoding");
         rejected=false;try {g1_parkour::Decode(bytes.data(),bytes.size()-1,policy.signature);} catch(...) {rejected=true;}
         Check(rejected,"Truncated packet must fail");
+        g1_parkour::Observation previous,current;
+        previous.sequence=10;previous.time=1.;previous.q.fill(0);previous.gravity={0,0,-1};previous.depth.fill(1);
+        current=previous;current.sequence=13;current.time=1.06;current.q.fill(.3f);current.depth.fill(2);
+        auto recovered=g1_parkour::RecoverObservationGap(previous,current,.02);
+        Check(recovered.size()==3,"Recover two lost samples");
+        Check(std::abs(recovered[0].time-1.02)<1e-8 && std::abs(recovered[0].q[0]-.1f)<1e-6,
+              "Recovered proprioception must preserve 20ms timing");
+        Check(recovered[0].depth[0]==1 && recovered[1].depth[0]==1 && recovered[2].depth[0]==2,
+              "Missing camera frames must hold previous image");
+        current.sequence=11; // Publisher skipped sampling rather than network packet loss.
+        Check(g1_parkour::RecoverObservationGap(previous,current,.02).size()==3,"Recover sender timing gap");
+        current.time=1.14;rejected=false;
+        try {g1_parkour::RecoverObservationGap(previous,current,.02);} catch(...) {rejected=true;}
+        Check(rejected,"Large gaps must retain protection");
+        current.time=1.025;rejected=false;
+        try {g1_parkour::RecoverObservationGap(previous,current,.02);} catch(...) {rejected=true;}
+        Check(rejected,"Non-periodic timestamps must fail");
         std::cout<<"Parkour history, depth, feedback and protocol checks passed\n";
         return 0;
     } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}

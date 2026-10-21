@@ -1,5 +1,7 @@
 #pragma once
 #include <onnxruntime_cxx_api.h>
+#include "g1_visual_config.h"
+#include "g1_visual_observation.h"
 #include <yaml-cpp/yaml.h>
 #include <algorithm>
 #include <array>
@@ -13,18 +15,13 @@
 #include <vector>
 
 namespace g1_parkour {
-using Joints = std::array<float, 29>;
-using Image = std::array<float, 18*32>;
-struct Observation {
-    uint64_t sequence = 0;
-    double time = 0;
-    Joints q{}, dq{}; // policy joint order
-    std::array<float,3> omega{}, gravity{};
-    float height = 0;
-    std::array<float,36*64> depth{}; // image-plane metres
-};
+using g1_visual::Joints;
+using g1_visual::Observation;
+using g1_visual::RecoverObservationGap;
+using g1_visual::Decode;
+using Image = std::array<float,18*32>;
 
-class Policy {
+class Policy : public g1_visual::JointConfig {
     Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "g1_parkour"};
     std::unique_ptr<Ort::Session> encoder_, actor_;
     std::string encoder_in_, encoder_out_, actor_in_, actor_out_;
@@ -33,16 +30,6 @@ class Policy {
     Joints last_action_{};
     int delay_ = 0;
 
-    template<std::size_t N>
-    static std::array<float,N> Read(const YAML::Node& node) {
-        if (!node.IsSequence() || node.size()!=N) throw std::runtime_error("Invalid parkour configuration array");
-        std::array<float,N> values{};
-        for (std::size_t i=0; i<N; ++i) {
-            values[i]=node[i].as<float>();
-            if (!std::isfinite(values[i])) throw std::runtime_error("Non-finite configuration");
-        }
-        return values;
-    }
     static void Validate(Ort::Session& session, const std::vector<int64_t>& input,
                          const std::vector<int64_t>& output, std::string& in, std::string& out) {
         if (session.GetInputCount()!=1 || session.GetOutputCount()!=1)
@@ -73,39 +60,11 @@ class Policy {
         return {values,values+count};
     }
 public:
-    std::array<int,29> ids{}; // policy -> DDS
-    Joints neutral{}, kp{}, kd{}, scale{}, sign{}; // policy order
-    uint32_t signature=2166136261u;
-    double dt=.02;
-
-    Policy(const std::string& models, const std::string& config) {
+    const std::array<float,3> command_min{0,0,-1}, command_max{1,0,1};
+    Policy(const std::string& models, const std::string& config) : JointConfig(config) {
         const auto cfg=YAML::LoadFile(config);
-        neutral=Read<29>(cfg["default_joint_pos"]);
-        kp=Read<29>(cfg["kp"]); kd=Read<29>(cfg["kd"]); scale=Read<29>(cfg["action_scale"]);
-        sign=Read<29>(cfg["joint_sign"]);
         delay_=cfg["depth_delay_frames"].as<int>();
-        dt=cfg["step_dt"].as<double>();
-        if((delay_!=0 && delay_!=1) || !std::isfinite(dt) || std::abs(dt-.02)>1e-8)
-            throw std::runtime_error("Expected 20ms parkour observations and depth delay 0 or 1");
-        const std::vector<std::string> dds={
-            "left_hip_pitch_joint","left_hip_roll_joint","left_hip_yaw_joint","left_knee_joint",
-            "left_ankle_pitch_joint","left_ankle_roll_joint","right_hip_pitch_joint","right_hip_roll_joint",
-            "right_hip_yaw_joint","right_knee_joint","right_ankle_pitch_joint","right_ankle_roll_joint",
-            "waist_yaw_joint","waist_roll_joint","waist_pitch_joint","left_shoulder_pitch_joint",
-            "left_shoulder_roll_joint","left_shoulder_yaw_joint","left_elbow_joint","left_wrist_roll_joint",
-            "left_wrist_pitch_joint","left_wrist_yaw_joint","right_shoulder_pitch_joint","right_shoulder_roll_joint",
-            "right_shoulder_yaw_joint","right_elbow_joint","right_wrist_roll_joint","right_wrist_pitch_joint","right_wrist_yaw_joint"};
-        auto names=cfg["joint_names"].as<std::vector<std::string>>();
-        if(names.size()!=29) throw std::runtime_error("Expected 29 policy joints");
-        std::array<bool,29> seen{};
-        for(int i=0;i<29;++i) {
-            auto found=std::find(dds.begin(),dds.end(),names[i]);
-            if(found==dds.end() || seen[found-dds.begin()]) throw std::runtime_error("Unknown or duplicate joint");
-            ids[i]=found-dds.begin(); seen[ids[i]]=true;
-            if(sign[i]!=1 && sign[i]!=-1) throw std::runtime_error("joint_sign must be +1 or -1");
-            for(unsigned char c:names[i]+":"+std::to_string(static_cast<int>(sign[i]))+"\n") signature=(signature^c)*16777619u;
-            if(kp[i]<=0 || kd[i]<0) throw std::runtime_error("Invalid PD gains");
-        }
+        if(delay_!=0 && delay_!=1) throw std::runtime_error("Expected depth delay 0 or 1");
         Ort::SessionOptions options; options.SetIntraOpNumThreads(1); options.SetInterOpNumThreads(1);
         encoder_=std::make_unique<Ort::Session>(env_,(models+"/0-depth_encoder.onnx").c_str(),options);
         actor_=std::make_unique<Ort::Session>(env_,(models+"/actor.onnx").c_str(),options);
@@ -150,7 +109,11 @@ public:
         return {proprio,depth};
     }
     Joints Step(const Observation& obs,const std::array<float,3>& command) {
-        auto inputs=Observe(obs,command);
+        return Infer(Observe(obs,command));
+    }
+    Joints Infer(std::pair<std::vector<float>,std::vector<float>> inputs) {
+        if(inputs.first.size()!=768 || inputs.second.size()!=8*18*32)
+            throw std::runtime_error("Invalid prepared parkour inputs");
         auto latent=Run(*encoder_,inputs.second,{1,8,18,32},encoder_in_,encoder_out_);
         inputs.first.insert(inputs.first.end(),latent.begin(),latent.end());
         auto actions=Run(*actor_,inputs.first,{1,896},actor_in_,actor_out_);
@@ -161,23 +124,6 @@ public:
         }
         return target;
     }
-    Joints DefaultDds() const {Joints result{};for(int i=0;i<29;++i) result[ids[i]]=sign[i]*neutral[i];return result;}
 };
 
-// Local UDP protocol: little endian, 32-byte header and 2369 float32 values.
-inline Observation Decode(const unsigned char* bytes,std::size_t size,uint32_t signature) {
-    constexpr std::size_t count=29+29+3+3+1+36*64;
-    if(size!=32+count*4 || std::memcmp(bytes,"G1PKR001",8)!=0) throw std::runtime_error("Invalid observation packet");
-    uint32_t order=0,n=0; Observation result;
-    std::memcpy(&result.sequence,bytes+8,8);std::memcpy(&result.time,bytes+16,8);
-    std::memcpy(&order,bytes+24,4);std::memcpy(&n,bytes+28,4);
-    if(order!=signature || n!=count || !std::isfinite(result.time)) throw std::runtime_error("Observation joint order/count/time mismatch");
-    std::array<float,count> values{};std::memcpy(values.data(),bytes+32,count*4);
-    std::copy_n(values.begin(),29,result.q.begin());std::copy_n(values.begin()+29,29,result.dq.begin());
-    std::copy_n(values.begin()+58,3,result.omega.begin());std::copy_n(values.begin()+61,3,result.gravity.begin());
-    result.height=values[64];std::copy_n(values.begin()+65,36*64,result.depth.begin());
-    for(int i=0;i<65;++i) if(!std::isfinite(values[i])) throw std::runtime_error("Non-finite observation state");
-    for(float d:result.depth) if(std::isnan(d)||d<0) throw std::runtime_error("Invalid observation depth");
-    return result;
-}
 } // namespace g1_parkour

@@ -135,6 +135,7 @@ class UnitreeSdk2Bridge:
         q = self.mj_data.qpos[self.motor_qpos_adr]
         dq = self.mj_data.qvel[self.motor_dof_adr]
         self.mj_data.ctrl[:] = tau + kp * (q_target - q) + kd * (dq_target - dq)
+        return bool(np.any(kp) or np.any(kd) or np.any(tau))
 
     def PublishLowState(self):
         if self.mj_data != None:
@@ -410,33 +411,5 @@ class UnitreeSdk2Bridge:
         print(" ")
 
 
-class ElasticBand:
-
-    def __init__(self):
-        self.stiffness = 200
-        self.damping = 100
-        self.point = np.array([0, 0, 3])
-        self.length = 0
-        self.enable = True
-
-    def Advance(self, x, dx):
-        """
-        Args:
-          δx: desired position - current position
-          dx: current velocity
-        """
-        δx = self.point - x
-        distance = np.linalg.norm(δx)
-        direction = δx / distance
-        v = np.dot(dx, direction)
-        f = (self.stiffness * (distance - self.length) - self.damping * v) * direction
-        return f
-
-    def MujuocoKeyCallback(self, key):
-        glfw = mujoco.glfw.glfw
-        if key == glfw.KEY_7:
-            self.length -= 0.1
-        if key == glfw.KEY_8:
-            self.length += 0.1
-        if key == glfw.KEY_9:
-            self.enable = not self.enable
+# Preserve the existing import path for simulator users.
+from elastic_band import ElasticBand

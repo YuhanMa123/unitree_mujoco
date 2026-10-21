@@ -2,11 +2,23 @@
 # 介绍
 ## G1 Parkour 推理
 
-使用现有 Python MuJoCo 仿真和 C++ ONNX Runtime 运行 G1 Parkour 双网络策略，
-包含 DDS 控制、腰部坐标转换和深度相机预览。
-编译、启动、按键及验证方法见 [G1 Parkour 接入说明](example/cpp/README_g1_parkour.md)。
+使用 C++ MuJoCo 仿真和 C++ ONNX Runtime 运行 G1 Parkour 双网络策略，
+包含同步深度观测、DDS 控制和腰部坐标转换；Python 参考与预览入口保留。
+编译、启动、按键及验证方法见 [G1 Parkour 接入说明](example/cpp/README.md#g1-parkour)。
+
+## G1 CA PE AMP VAE 视觉运控
+
+新增 C++ `g1_ca_pe_amp_vae`，配套训练快照、部署 JSON、actor 与深度 token ONNX 位于
+`example/exported/g1_CA_PE_AMP_VAE/`。使用 pelvis 状态、5 帧本体历史和交叉注意力视觉推理。
+构建与启动见 [视觉部署说明](example/exported/g1_CA_PE_AMP_VAE/README.md)，
+模块关系见 [项目结构梳理](doc/project_structure.md)。
 
 ## Unitree mujoco
+
+G1 29DOF 支持 C++ 网页关节与 IMU 实时监控。编译后另开终端运行
+`./simulate/build/joint_monitor --domain 1 --interface lo`，浏览器打开 `http://127.0.0.1:8765`。
+构建方法、数据含义和参数见 [网页监控说明](simulate/README_joint_monitor.md)。
+
 `unitree_mujoco` 是基于 `Unitree sdk2` 和 `mujoco` 开发的仿真器。用户使用 `Unitree_sdk2`、 `unitree_ros2` 和 `unitree_sdk2_python` 开发的控制程序可以方便地接入该仿真器，实现仿真到实物的开发流程。仓库别基于 c++ 和 python 实现了两个版本的仿真器， 其结构大致如下图所示:
 
 ![](./doc/func.png)
@@ -258,7 +270,12 @@ if js_type == "xbox":
     }
 ```
 ### 人形机器人虚拟挂带
-考虑到人形机器人不便于从平地上启动并进行调试，在仿真中设计了一个虚拟挂带，用于模拟人形机器人的吊起和放下。设置 `enable_elastic_band/ENABLE_ELASTIC_BAND = 1` 可以启用虚拟挂带。加载机器人后，按 `9` 启用或松开挂带，按 `7` 放下机器人，按 `8` 吊起机器人。
+虚拟挂带用于在人形机器人关节初始化时提供支撑。设置 `enable_elastic_band: 1`（C++）或 `ENABLE_ELASTIC_BAND = True`（Python）启用。MuJoCo 窗口按 `9` 释放或重新挂接，按 `7` 缩短挂带、吊起机器人，按 `8` 放长挂带、放下机器人；C++ 还支持方向键上/下及手柄 Y/A 升降，X 释放挂带。
+
+挂带在连接躯干的质心施加外力，不锁定浮动基座姿态，也不保持关节角度。检查悬挂姿态前，先用控制器初始化关节。G1 吊起检查时先按 B / `p` 返回关节初始化保持；跑酷和视觉控制器在 Y/A 升降时仍继续策略推理，机器人悬空后可能继续摆腿、扭腰。重新行走时，先缓慢放下至双脚接地，再启动策略并释放挂带。操作顺序见 [G1 C++ 说明](example/cpp/README.md)。
+
+视觉仿真在尚未启用电机控制时保留模型被动阻尼/摩擦，启用初始化或策略输出后再切换训练动力学。
+启动悬挂持续扭动的原因和验证见[悬挂排查记录](doc/g1_suspension.md)。
 
 ## 2. 地形生成工具
 我们提供了一个在 mujoco 仿真器中参数化创建简单地形的工具，支持添加楼梯、杂乱地面、高程图等地形。程序位于 `terrain_tool` 文件夹中。具体的使用方法见 `terrain_tool` 文件夹下的 readme 文件。

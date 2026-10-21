@@ -59,7 +59,9 @@ inline struct SimulationConfig
     int print_scene_information;
 
     int enable_elastic_band;
-    int band_attached_link = 0;
+    bool parkour = false;
+    int parkour_port = 17200;
+    std::string parkour_config;
 
     void load_from_yaml(const std::string &filename)
     {
@@ -103,6 +105,9 @@ inline po::variables_map helper(int argc, char** argv)
         ("robot,r", po::value<std::string>(&config.robot), "Robot type; -r go2")
         ("scene,s", po::value<std::filesystem::path>(&config.robot_scene), "Robot scene file; -s scene_terrain.xml")
         ("idl_type,t", po::value<int>(&config.idl_type), "DDS IDL type: -1 auto, 0 unitree_go, 1 unitree_hg")
+        ("parkour", po::bool_switch(&config.parkour), "Enable synchronized G1 parkour observations")
+        ("parkour-port", po::value<int>(&config.parkour_port), "Parkour loopback UDP port (default 17200)")
+        ("parkour-config", po::value<std::string>(&config.parkour_config), "Parkour deployment JSON path")
     ;
 
     po::variables_map vm;

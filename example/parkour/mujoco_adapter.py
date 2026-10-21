@@ -9,6 +9,9 @@ class MujocoAdapter:
         if self.sign.shape != (29,) or not np.isin(self.sign, [-1, 1]).all():
             raise ValueError('joint_sign must contain 29 values in {-1, 1}')
         self.torso = model.body('torso_link').id
+        self.ray_alignment = policy.config.get('camera', {}).get('ray_alignment', 'body')
+        if self.ray_alignment not in ('body', 'yaw'):
+            raise ValueError('camera ray_alignment must be body or yaw')
         joints = np.array([model.joint(n).id for n in policy.joint_names])
         self.qadr = model.jnt_qposadr[joints]
         self.vadr = model.jnt_dofadr[joints]
@@ -23,6 +26,8 @@ class MujocoAdapter:
                 raise ValueError('only direct unit-gear torque motors are supported')
             self.actuators.append(actuator)
         self.actuators = np.array(self.actuators)
+        self.idle_damping = model.dof_damping[self.vadr].copy()
+        self.idle_friction = model.dof_frictionloss[self.vadr].copy()
         if configure_dynamics:
             model.dof_armature[self.vadr] = policy.config['armature']
             # Training PD already supplies damping; remove extra passive motor damping/friction.
@@ -32,6 +37,11 @@ class MujocoAdapter:
                                  np.max(np.abs(model.actuator_ctrlrange[self.actuators]), axis=1))
         self.target = policy.default.copy()
         self._make_rays()
+
+    def set_motor_control_active(self, active):
+        """DDS simulator: retain model losses until motor PD is actually enabled."""
+        self.model.dof_damping[self.vadr] = 0. if active else self.idle_damping
+        self.model.dof_frictionloss[self.vadr] = 0. if active else self.idle_friction
 
     def _make_rays(self):
         u, v = np.meshgrid(np.arange(64) + .5, np.arange(36) + .5)
@@ -50,7 +60,12 @@ class MujocoAdapter:
     def depth(self):
         rotation = self.data.xmat[self.torso].reshape(3, 3)
         origin = self.data.xpos[self.torso] + rotation @ self.offset
-        directions = np.ascontiguousarray(self.rays @ rotation.T)
+        ray_rotation = rotation
+        if self.ray_alignment == 'yaw':
+            yaw = np.arctan2(rotation[1, 0], rotation[0, 0])
+            c, s = np.cos(yaw), np.sin(yaw)
+            ray_rotation = np.array([[c, -s, 0.], [s, c, 0.], [0., 0., 1.]])
+        directions = np.ascontiguousarray(self.rays @ ray_rotation.T)
         distances = np.empty(len(directions))
         ids = np.empty(len(directions), dtype=np.int32)
         # Include collision groups only; visual mesh copies must not occlude the rays.
@@ -66,7 +81,7 @@ class MujocoAdapter:
     def observation(self, command):
         rotation = self.data.xmat[self.torso].reshape(3, 3)
         velocity = np.zeros(6)
-        mujoco.mj_objectVelocity(self.model, self.data, mujoco.mjtObj.mjOBJ_BODY,
+        mujoco.mj_objectVelocity(self.model, self.data, mujoco.mjtObj.mjOBJ_XBODY,
                                 self.torso, velocity, 1)
         return (self.sign * self.data.qpos[self.qadr], self.sign * self.data.qvel[self.vadr], velocity[:3],
                 rotation.T @ np.array([0., 0., -1.]), command, self.depth())

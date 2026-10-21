@@ -247,7 +247,11 @@ if js_type == "xbox":
 ```
 
 ### Elastic band for humanoid 
-Consider humanoid robots are not suitable for starting in ground, a virtual elastic band was designed to simulate the lifting and lowering of humanoid robots. Setting ` enable_elastic_mand/ENABLE_ELSTIC_BAND=1 ` can enable the virtual elastic band. After loading the robot, press' 9 'to activate or release the strap, press' 7' to lower the robot, and press' 8 'to lift the robot.
+A virtual elastic band supports humanoid robots during joint initialization. Set `enable_elastic_band: 1` (C++) or `ENABLE_ELASTIC_BAND = True` (Python). In the simulation window, `9` releases or reattaches the band, `7` shortens it to lift the robot, and `8` lengthens it to lower the robot. C++ also supports Up/Down for lifting/lowering and Xbox Y/A; X releases the band.
+
+The band applies a force at the attached body's center of mass; it does not lock base orientation or hold joint angles. Initialize joints in the controller before testing suspension. For G1, use B / `p` to return to joint initialization and hold before lifting for inspection. Parkour and visual controllers keep policy inference running during Y/A band movement; a suspended robot may keep moving its limbs. Lower until the feet contact the ground before starting the walking policy and releasing the band. See [G1 C++ controls](example/cpp/README.md).
+
+Visual simulation retains the model's passive damping/friction while motors are unpowered, then switches to training dynamics when joint initialization or policy control produces motor commands.
 
 ## 2. Terrain Generation Tool
 We provide a tool to parametrically create simple terrains in the mujoco simulator, including stairs, rough ground, and height maps. The program is located in the `terrain_tool` folder. For specific usage instructions, refer to the README file in the `terrain_tool` folder.

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 
 PARKOUR = Path(__file__).resolve().parents[1] / 'example' / 'parkour'
+DEFAULT_CONFIG = PARKOUR.parent / 'exported' / 'g1_parkour' / 'g1_torsobase_cfg.json'
 sys.path.insert(0, str(PARKOUR))
 from mujoco_adapter import MujocoAdapter
 
@@ -24,11 +25,11 @@ class ParkourObservationPublisher:
     def __init__(self, model, data, port=17200, config_path=None):
         if not 1024 <= port <= 65535:
             raise ValueError('parkour observation port must be 1024..65535')
-        cfg = json.loads(Path(config_path or PARKOUR / 'g1.json').read_text())
+        cfg = json.loads(Path(config_path or DEFAULT_CONFIG).read_text())
         params = SimpleNamespace(config=cfg, joint_names=cfg['joint_names'],
                                  default=np.array(cfg['default_joint_pos']),
                                  effort=np.array(cfg['effort_limit']))
-        self.adapter = MujocoAdapter(model, data, params, configure_dynamics=False)
+        self.adapter = MujocoAdapter(model, data, params, configure_dynamics=True)
         self.signature = joint_signature(params.joint_names, cfg['joint_sign'])
         self.data = data
         self.period = cfg['step_dt']

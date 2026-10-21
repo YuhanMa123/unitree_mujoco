@@ -1,11 +1,11 @@
 # G1 Parkour 双网络推理
 
-当前使用方式是 **Python启动现有Unitree MuJoCo，C++推理并通过DDS控制**。
-编译、启动和按键操作见 [Python仿真+C++推理](../cpp/README_g1_parkour.md)。
+主部署入口为 **C++ Unitree MuJoCo 采集同步状态/深度，C++ 推理并通过 DDS 控制**。
+编译、启动和按键操作见 [C++ 仿真与推理](../cpp/README.md#g1-parkour)。
 下方Python推理和独立rollout仅作离线参考及诊断。
 
-默认使用仓库 `exported/g1_parkour/` 内的 `0-depth_encoder.onnx` 和 `actor.onnx`，提供独立 ONNX Runtime CPU
-推理模块及 MuJoCo 控制入口。无 Isaac Sim 依赖，不覆盖根目录 `policy.onnx`，不发布 DDS 命令。
+默认使用仓库 `example/exported/g1_parkour/` 内的 `0-depth_encoder.onnx` 和 `actor.onnx`，提供独立 ONNX Runtime CPU
+推理模块及 MuJoCo 控制入口。无 Isaac Sim 依赖，不覆盖`example/exported/g1_locomotion/policy.onnx`，不发布 DDS 命令。
 
 ## Python参考推理与独立诊断（可选）
 
@@ -21,13 +21,13 @@ cd /home/wsy/rl/unitree_mujoco
 /home/wsy/miniconda3/envs/instinctlab/bin/python example/parkour/run_mujoco.py --seconds 10
 # 指定场景、模型目录、三维命令
 /home/wsy/miniconda3/envs/instinctlab/bin/python example/parkour/run_mujoco.py \
-  --model-dir exported/g1_parkour \
+  --model-dir example/exported/g1_parkour \
   --scene unitree_robots/g1/scene_29dof.xml --command 0.3 0 0 --seconds 10
 # 自动检查
 /home/wsy/miniconda3/envs/instinctlab/bin/python -m unittest discover -s example/parkour/tests -v
 ```
 
-其他环境可安装 `requirements.txt`。`--config` 可指定替代 `g1.json`。
+其他环境可安装 `requirements.txt`。`--config` 可指定替代 `g1_torsobase_cfg.json`。
 无界面模式按仿真时间运行；窗口模式按物理步进行实时节流。
 独立运行器自行创建仿真，无需启动 `simulate_python/unitree_mujoco.py`。
 
@@ -68,7 +68,7 @@ MuJoCo 相机通过 CPU 射线生成深度，无需 OpenGL 渲染。相机使用
 ## 配置来源与验证边界
 
 导出目录只有两个网络，没有此次训练的 `params/env.yaml` 或关节名称元数据。
-`g1.json` 据本机 InstinctLab 下列源码重建，不能证明源码与当时训练完全一致：
+`g1_torsobase_cfg.json` 据本机 InstinctLab 下列源码重建，不能证明源码与当时训练完全一致：
 
 - `tasks/parkour/config/parkour_env_cfg.py`：观测、深度、周期和动作缩放。
 - `tasks/parkour/config/g1/g1_parkour_target_amp_cfg.py`：torso根模型及带鞋配置。
@@ -88,7 +88,7 @@ MuJoCo 相机通过 CPU 射线生成深度，无需 OpenGL 渲染。相机使用
   以及腰链正向运动学和关节速度/力矩方向回归检查。
 - 固定基座MuJoCo运行1秒、500物理步通过。
 - 修复腰部方向后，独立诊断运行零命令10秒，最低torso高度0.806m，结束时XY位移0.075m。
-- 当前Python Unitree仿真→C++推理→DDS控制链路的零命令落地检查已通过。
+- 此前 Python Unitree 仿真→C++ 推理→DDS 控制链路的零命令落地检查已通过。
   跑酷尚未验证；保护在torso低于0.5m或倾斜超过1rad时停止。
   此前自由落地失败是方向转换遗漏，旧的固定基座检查没有覆盖物理坐标含义。
 

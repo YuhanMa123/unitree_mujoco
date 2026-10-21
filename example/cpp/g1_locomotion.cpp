@@ -1,4 +1,4 @@
-// G1 29DOF simulation/hardware joint reset: current position -> default pose -> hold.
+// G1 29DOF locomotion controller: enable -> joint initialization -> ONNX policy.
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -21,16 +21,15 @@
 #include <memory>
 #include <net/if.h>
 #include "g1_hardware.h"
+#include <unitree_mujoco/simulation_reset.h>
 #include <unitree/robot/b2/motion_switcher/motion_switcher_client.hpp>
 
 #include <unitree/idl/hg/LowCmd_.hpp>
 #include <unitree/idl/hg/LowState_.hpp>
 #include <unitree/robot/channel/channel_publisher.hpp>
 #include <unitree/robot/channel/channel_subscriber.hpp>
-#ifdef G1_WITH_POLICY
 #include "g1_locomotion_policy.h"
 #include <unitree_mujoco/gamepad.h>
-#endif
 
 using unitree_hg::msg::dds_::LowCmd_;
 using unitree_hg::msg::dds_::LowState_;
@@ -121,16 +120,12 @@ uint32_t CommandCrc(const LowCmd_& command) {
 }
 }  // namespace
 
-class JointReset {
+class G1Locomotion {
 public:
-    explicit JointReset(const ResetConfig& config, const g1_hardware::Limits* hardware, bool read_only
-#ifdef G1_WITH_POLICY
-        , g1_policy::Policy* policy
-#endif
-    ) : config_(config), hardware_(hardware), read_only_(read_only), publisher_("rt/lowcmd"), target_publisher_("rt/g1/reset_target"), enable_publisher_("rt/g1/reset_enable"), subscriber_("rt/lowstate") {
-#ifdef G1_WITH_POLICY
+    explicit G1Locomotion(const ResetConfig& config, const g1_hardware::Limits* hardware,
+                          bool read_only, g1_policy::Policy* policy)
+        : config_(config), hardware_(hardware), read_only_(read_only), publisher_("rt/lowcmd"), target_publisher_("rt/g1/reset_target"), enable_publisher_("rt/g1/reset_enable"), subscriber_("rt/lowstate") {
         policy_ = policy;
-#endif
         if (!read_only_) {
             publisher_.InitChannel();
             target_publisher_.InitChannel();
@@ -141,9 +136,9 @@ public:
             command_monitor_->InitChannel([this](const void*) { command_seen_ = true; }, 1);
         }
         subscriber_.InitChannel(
-            std::bind(&JointReset::OnState, this, std::placeholders::_1), 1);
+            std::bind(&G1Locomotion::OnState, this, std::placeholders::_1), 1);
     }
-    ~JointReset() { subscriber_.CloseChannel(); if (command_monitor_) command_monitor_->CloseChannel(); }
+    ~G1Locomotion() { subscriber_.CloseChannel(); if (command_monitor_) command_monitor_->CloseChannel(); }
 
     int Run(double duration) {
         std::cout << "Waiting for G1 29DOF lowstate (5 s timeout)...\n";
@@ -168,6 +163,8 @@ public:
             std::cout << "Read-only hardware check: valid CRC, G1 mode=5, joints/IMU/motors OK. No control service release or LowCmd publication.\n";
             return 0;
         }
+        auto previous_simulation_tick = state.tick();
+        auto previous_reset_generation = state.reserve()[1];
         std::array<float, kJointCount> previous_target{};
         for (std::size_t i = 0; i < kJointCount; ++i) previous_target[i] = state.motor_state()[i].q();
         std::array<float, kJointCount> start_angles{};
@@ -185,7 +182,6 @@ public:
         bool publishing = false;
         bool holding = false;
         bool power_locked = false; // Once reset starts, only restarting the process permits power-on.
-#ifdef G1_WITH_POLICY
         bool policy_active = false;
         std::array<float, 3> velocity{};
         g1_policy::Joints policy_target{};
@@ -200,8 +196,7 @@ public:
         std::cout << "Sequence: 9 -> P (wait for reset) -> R (policy). P: return to reset; 9 is locked after P.\n"
                   << "W/S: forward +/-0.1 m/s, A/D: lateral +/-0.1 m/s, Q/E: yaw +/-0.1 rad/s, X: zero velocity.\n";
         if (gamepad_config.enabled)
-            std::cout << "Xbox: B enables/resets, Menu starts policy, left stick / D-pad translate, right stick turns, View / R3 stops.\n";
-#endif
+            std::cout << "Xbox: B enables/resets joints, RB resets simulation preserving policy mode, Menu starts policy, left stick / D-pad translate, right stick turns, View / R3 stops.\n";
         auto publish_enable = [&](bool enabled) {
             LowCmd_ status{};
             for (std::size_t i = 0; i < kJointCount; ++i)
@@ -235,6 +230,25 @@ public:
                 result = 1;
                 break;
             }
+            const bool simulation_reset = !hardware_ &&
+                ((state.reserve()[0] == unitree_mujoco::kSimulationResetMarker &&
+                  state.reserve()[1] != previous_reset_generation) ||
+                 state.tick() < previous_simulation_tick);
+            previous_simulation_tick = state.tick();
+            previous_reset_generation = state.reserve()[1];
+            if (simulation_reset) {
+                // Preserve output and policy mode; discard pre-reset history/targets.
+                for (std::size_t i = 0; i < kJointCount; ++i)
+                    start_angles[i] = state.motor_state()[i].q();
+                start = Clock::now();
+                holding = policy_active;
+                velocity.fill(0);
+                gamepad_drive.Clear();
+                if (policy_) policy_->Reset();
+                next_policy = Clock::now();
+                std::cout << "Simulation reset received; policy " << (policy_active ? "ON" : "OFF")
+                          << "; history and velocity cleared.\n";
+            }
             char key = 0;
             try {
                 key = keyboard.Read();
@@ -246,7 +260,6 @@ public:
             if (key == ' ') break;
             bool reset_requested = key == 'p' || key == 'P';
             bool enable_requested = key == '9';
-#ifdef G1_WITH_POLICY
             bool policy_requested = key == 'r' || key == 'R';
             const auto pad = gamepad_reader.Poll();
             if (gamepad_config.enabled && (!gamepad_reported || pad.connected != gamepad_connected)) {
@@ -259,11 +272,10 @@ public:
                 gamepad_reported = true;
             }
             const auto gamepad_action = gamepad_drive.Update(pad, velocity, policy_active);
-            if (gamepad_action.stop || gamepad_action.suspend) velocity.fill(0);
+            if (gamepad_action.stop || gamepad_action.suspend || gamepad_action.simulation_reset) velocity.fill(0);
             reset_requested |= gamepad_action.reset || (gamepad_action.suspend && policy_active);
             enable_requested |= gamepad_action.reset && !output_enabled;
             policy_requested |= gamepad_action.start;
-#endif
             if (enable_requested) {
                 if (power_locked) {
                     std::cout << "Power-on locked after reset/policy entry; restart the controller to power on again.\n";
@@ -285,12 +297,10 @@ public:
             }
             if (reset_requested && output_enabled) {
                 power_locked = true;
-#ifdef G1_WITH_POLICY
                 policy_active = false;
                 velocity.fill(0);
                 gamepad_drive.Clear();
                 if (policy_) policy_->Reset();
-#endif
                 for (std::size_t i = 0; i < kJointCount; ++i)
                     start_angles[i] = state.motor_state()[i].q();
                 start = Clock::now();
@@ -299,7 +309,6 @@ public:
                 std::cout << "Reset target generated from current joint angles."
                           << (output_enabled ? " Publishing enabled.\n" : " Output disabled; targets only.\n");
             }
-#ifdef G1_WITH_POLICY
             if (policy_requested && !reset_requested && !policy_active) {
                 bool pose_ready = true;
                 const auto neutral = policy_->DefaultDds();
@@ -357,7 +366,6 @@ public:
                         next_policy = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(policy_->dt));
                 }
             }
-#endif
             publish_enable(output_enabled);
             if (!active) {
                 if (hardware_ && output_enabled) {
@@ -382,21 +390,17 @@ public:
             for (std::size_t i = 0; i < kJointCount; ++i) {
                 auto& motor = command.motor_cmd()[i];
                 motor.mode() = 1;
-#ifdef G1_WITH_POLICY
                 if (policy_active) {
                     motor.q() = policy_target[i];
                     motor.kp() = policy_->kp[i];
                     motor.kd() = policy_->kd[i];
                 } else {
-#endif
                 motor.q() = u == 1.0 ? config_.default_pos[i] :
                     static_cast<float>(start_angles[i] +
                         blend * (config_.default_pos[i] - start_angles[i]));
                 motor.kp() = config_.kp[i];
                 motor.kd() = config_.kd[i];
-#ifdef G1_WITH_POLICY
                 }
-#endif
                 motor.dq() = 0;
                 motor.tau() = 0;
             }
@@ -430,9 +434,7 @@ public:
     }
 
 private:
-#ifdef G1_WITH_POLICY
     g1_policy::Policy* policy_ = nullptr;
-#endif
     void OnState(const void* message) {
         const auto& state = *static_cast<const LowState_*>(message);
         std::lock_guard<std::mutex> lock(mutex_);
@@ -496,7 +498,6 @@ int main(int argc, char** argv) {
     const bool read_only = hardware && std::string(argv[1]) == "--hardware-read-only";
     const std::string program = argv[0];
     if (hardware) { --argc; ++argv; }
-#ifdef G1_WITH_POLICY
     if (argc > 1 && std::string(argv[1]) == "--check-policy") {
         try {
             if (argc > 4) throw std::runtime_error("Usage: --check-policy [model.onnx] [deploy.yaml]");
@@ -515,16 +516,11 @@ int main(int argc, char** argv) {
         }
     }
     constexpr int max_args = 6;
-#else
-    constexpr int max_args = 5;
-#endif
     if (argc > max_args || (argc > 1 && std::string(argv[1]) == "--help")) {
         std::cout << "Usage: " << argv[0] << " [reset_seconds=3] [interface=lo] [domain=1] [locomotion.yaml]\n"
                   << "Default: MuJoCo, positive domain. Hardware: prepend --hardware or --hardware-read-only, explicitly set interface and domain 0.\n";
-#ifdef G1_WITH_POLICY
         std::cout << "Optional argument after locomotion.yaml: [model.onnx]\n"
                   << "Offline inference: --check-policy [model.onnx] [deploy.yaml]\n";
-#endif
         return argc > max_args ? 1 : 0;
     }
     try {
@@ -543,13 +539,11 @@ int main(int argc, char** argv) {
         const std::string config_path = argc > 4 ? argv[4] : G1_POLICY_DEFAULT_CONFIG;
         const auto config = LoadConfig(config_path);
         std::cout << "Loaded shared locomotion configuration: " << config_path << '\n';
-#ifdef G1_WITH_POLICY
         std::unique_ptr<g1_policy::Policy> policy;
         if (!read_only) {
             policy = std::make_unique<g1_policy::Policy>(argc > 5 ? argv[5] : G1_POLICY_DEFAULT_MODEL, config_path);
             std::cout << "Loaded locomotion policy, period " << policy->dt << " s\n";
         }
-#endif
         std::unique_ptr<g1_hardware::Limits> hardware_limits;
         if (hardware) {
             hardware_limits = std::make_unique<g1_hardware::Limits>(YAML::LoadFile(config_path));
@@ -561,11 +555,7 @@ int main(int argc, char** argv) {
         std::signal(SIGINT, Stop);
         std::signal(SIGHUP, Stop);
         unitree::robot::ChannelFactory::Instance()->Init(domain, argc > 2 ? argv[2] : "lo");
-        JointReset controller(config, hardware_limits.get(), read_only
-#ifdef G1_WITH_POLICY
-            , policy.get()
-#endif
-        );
+        G1Locomotion controller(config, hardware_limits.get(), read_only, policy.get());
         return controller.Run(duration);
     } catch (const std::exception& error) {
         std::cerr << "Error: " << error.what() << '\n';

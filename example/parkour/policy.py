@@ -5,7 +5,7 @@ import json
 import numpy as np
 import onnxruntime as ort
 
-DEFAULT_MODELS = Path(__file__).resolve().parents[2] / 'exported' / 'g1_parkour'
+DEFAULT_MODELS = Path(__file__).resolve().parents[1] / 'exported' / 'g1_parkour'
 
 
 def vector(value, size, name):
@@ -20,7 +20,7 @@ from depth_image import preprocess_depth
 
 class ParkourPolicy:
     def __init__(self, model_dir=DEFAULT_MODELS, config=None):
-        self.config = json.loads(Path(config or Path(__file__).with_name('g1.json')).read_text())
+        self.config = json.loads(Path(config or DEFAULT_MODELS / 'g1_torsobase_cfg.json').read_text())
         c = self.config
         if type(c['depth_delay_frames']) is not int or c['depth_delay_frames'] not in (0, 1):
             raise ValueError('depth_delay_frames must be 0 or 1')

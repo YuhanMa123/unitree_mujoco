@@ -177,6 +177,7 @@ private:
 
 struct Actions {
     bool reset = false, start = false, stop = false, suspend = false;
+    bool simulation_reset = false;
     bool planar_update = false, yaw_update = false;
     std::array<float, 3> velocity{};
 };
@@ -198,9 +199,10 @@ public:
         if (!previous.connected) { Clear(); return action; }
         action.reset = state.b && !previous.b;
         action.start = !action.reset && state.start && !previous.start;
-        action.suspend = (state.a && !previous.a) || (state.y && !previous.y) || (state.rb && !previous.rb);
+        action.suspend = (state.a && !previous.a) || (state.y && !previous.y);
+        action.simulation_reset = state.rb && !previous.rb;
         action.stop = (state.back && !previous.back) || (state.rs && !previous.rs);
-        if (action.reset || action.start || action.stop || action.suspend || !active) {
+        if (action.reset || action.start || action.stop || action.suspend || action.simulation_reset || !active) {
             Clear(); return action;
         }
         const float forward = config_.Deadzone(state.forward), left = config_.Deadzone(state.left);
